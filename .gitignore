@@ -317,3 +317,7 @@ http-client.private.env.json
 
 # Exclude logs directory
 logs/*
+
+# Exclude data Set
+
+data/*
