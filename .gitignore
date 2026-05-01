@@ -315,9 +315,22 @@ http-client.private.env.json
 
 # PROJECT SPECIFIC EXCLUSIONS ↓
 
-# Exclude logs directory
+# Exclude logs
 logs/*
 
-# Exclude data Set
+# Exclude raw data (too large for git)
+data/raw/*
 
-data/*
+# Keep processed folder tracked
+!data/processed/.gitkeep
+
+# Exclude trained models (regenerate with train.py)
+models/*.joblib
+models/*.pkl
+models/*.pickle
+
+# Keep plots and results
+plots/.gitkeep
+
+# Exclude notebook checkpoints
+notebooks/.ipynb_checkpoints/

@@ -1,0 +1,4 @@
+model_key,model_name,model_path,ic,hit_rate,sharpe,rmse,mae,r2
+ridge,Ridge Regression,/Users/alexandredelattre/Documents/POC/ml-poc-project-1/models/ridge.joblib,0.11249,0.545271,0.324263,0.037212,0.027096,-0.075732
+random_forest,Random Forest,/Users/alexandredelattre/Documents/POC/ml-poc-project-1/models/random_forest.joblib,0.143308,0.526273,0.270651,0.037704,0.028077,-0.104321
+xgboost,XGBoost,/Users/alexandredelattre/Documents/POC/ml-poc-project-1/models/xgboost.joblib,0.153267,0.562652,0.429529,0.037674,0.028072,-0.1026
