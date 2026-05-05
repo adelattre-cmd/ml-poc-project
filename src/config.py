@@ -30,6 +30,15 @@ FORWARD_DAYS   = 20       # prediction horizon (≈ 1 trading month)
 
 # ── Registered models ──────────────────────────────────────────────────────────
 MODELS = {
+    "pca_ridge": {
+        "name": "PCA + Ridge",
+        "description": (
+            "PCA reduces correlated flow features to orthogonal components "
+            "(retaining 95% variance), then Ridge regresses on the principal "
+            "components. Reduces multicollinearity between river gauges."
+        ),
+        "path": MODELS_DIR / "pca_ridge.joblib",
+    },
     "ridge": {
         "name": "Ridge Regression",
         "description": (

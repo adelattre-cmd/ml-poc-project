@@ -17,12 +17,18 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+from sklearn.decomposition import PCA
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import Ridge
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
-from xgboost import XGBRegressor
+
+try:
+    from xgboost import XGBRegressor
+    HAS_XGBOOST = True
+except (ImportError, OSError):
+    HAS_XGBOOST = False
 
 from data import load_dataset_split
 from metrics import compute_metrics
@@ -53,6 +59,12 @@ def train() -> None:
     print()
 
     models = {
+        "pca_ridge": Pipeline([
+            ("imputer", SimpleImputer(strategy="median")),
+            ("scaler",  StandardScaler()),
+            ("pca",     PCA(n_components=0.95)),
+            ("reg",     Ridge(alpha=1.0)),
+        ]),
         "ridge": make_pipeline(
             Ridge(alpha=1.0)
         ),
@@ -66,7 +78,10 @@ def train() -> None:
                 n_jobs=-1,
             )
         ),
-        "xgboost": make_pipeline(
+    }
+
+    if HAS_XGBOOST:
+        models["xgboost"] = make_pipeline(
             XGBRegressor(
                 n_estimators=400,
                 max_depth=4,
@@ -78,8 +93,9 @@ def train() -> None:
                 n_jobs=-1,
                 verbosity=0,
             )
-        ),
-    }
+        )
+    else:
+        print("  [skip] xgboost not available (install libomp: brew install libomp)")
 
     for name, model in models.items():
         print(f"Training {name}...")

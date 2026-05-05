@@ -267,7 +267,8 @@ def _backtest(X_test, y_test):
     st.header("Signal Backtest")
     st.markdown(
         "Long IDA / short XLU when predicted excess return > 0; "
-        "inverse when < 0. Daily rebalancing, **no transaction costs** (upper bound)."
+        "inverse when < 0. Non-overlapping positions every N trading days "
+        "(no double-counting of forward returns). **No transaction costs.**"
     )
 
     available = {k: v["name"] for k, v in MODELS.items()
@@ -282,12 +283,28 @@ def _backtest(X_test, y_test):
     if model is None:
         return
 
-    y_pred = pd.Series(model.predict(X_test), index=X_test.index)
-    signal = np.sign(y_pred)
-    ls_ret = signal * y_test
+    holding_period = st.slider(
+        "Holding period (trading days)", min_value=5, max_value=60,
+        value=FORWARD_DAYS, step=5,
+    )
+
+    # Filter to trading days only (remove weekend/holiday forward-fills)
+    mask_trading = y_test != y_test.shift(1)
+    mask_trading.iloc[0] = True
+    X_trading = X_test[mask_trading]
+    y_trading = y_test[mask_trading]
+
+    y_pred = pd.Series(model.predict(X_trading), index=X_trading.index)
+
+    # Non-overlapping positions every holding_period trading days
+    entry_idx = np.arange(0, len(y_trading), holding_period)
+    positions = y_pred.iloc[entry_idx]
+    returns = y_trading.iloc[entry_idx]
+    signal = np.sign(positions)
+    ls_ret = signal * returns
 
     cum_signal = (1 + ls_ret).cumprod()
-    cum_buynhold = (1 + y_test).cumprod()
+    cum_buynhold = (1 + returns).cumprod()
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=cum_signal.index, y=cum_signal,
@@ -296,20 +313,27 @@ def _backtest(X_test, y_test):
                              name="Buy & Hold IDA excess", line=dict(color=NEUTRAL, width=1.5,
                              dash="dot")))
     fig.add_hline(y=1, line_color="grey", line_dash="dash")
-    fig.update_layout(title=f"Cumulative L/S return — {available[key]} (test set 2019–2025)",
-                      yaxis_title="Cumulative return (base=1)",
-                      height=400)
+    fig.update_layout(
+        title=f"Cumulative L/S return — {available[key]} (test 2019–2025, hold={holding_period}d)",
+        yaxis_title="Cumulative return (base=1)",
+        height=400,
+    )
     st.plotly_chart(fig, use_container_width=True)
 
     col1, col2, col3, col4 = st.columns(4)
+    n_positions = len(ls_ret)
+    positions_per_year = 252 / holding_period
     total = float(cum_signal.iloc[-1] - 1)
-    ann_ret = float((cum_signal.iloc[-1]) ** (252 / len(cum_signal)) - 1)
-    vol = float(ls_ret.std() * np.sqrt(252))
+    ann_ret = float((cum_signal.iloc[-1]) ** (positions_per_year / n_positions) - 1)
+    vol = float(ls_ret.std() * np.sqrt(positions_per_year))
     sharpe = ann_ret / vol if vol > 0 else 0
     col1.metric("Total return", f"{total:+.1%}")
     col2.metric("Ann. return", f"{ann_ret:+.1%}")
     col3.metric("Ann. volatility", f"{vol:.1%}")
     col4.metric("Sharpe ratio", f"{sharpe:+.2f}")
+
+    st.caption(f"{n_positions} non-overlapping positions "
+               f"(~{positions_per_year:.0f}/year × {n_positions/positions_per_year:.1f} years)")
 
 
 def _feature_importance():

@@ -37,6 +37,11 @@ metrics_module = _load_module("project_metrics", SRC_DIR / "metrics.py")
 model_io_module = _load_module("project_model_io", SRC_DIR / "model_io.py")
 results_module = _load_module("project_results", SRC_DIR / "results.py")
 
+sys.modules["data"] = data_module
+sys.modules["metrics"] = metrics_module
+sys.modules["model_io"] = model_io_module
+sys.modules["results"] = results_module
+
 load_dataset_split = data_module.load_dataset_split
 compute_metrics = metrics_module.compute_metrics
 load_model = model_io_module.load_model
