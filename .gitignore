@@ -334,3 +334,4 @@ plots/.gitkeep
 
 # Exclude notebook checkpoints
 notebooks/.ipynb_checkpoints/
+.DS_Store
