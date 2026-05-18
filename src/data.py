@@ -158,10 +158,15 @@ def build_features(
             continue
         s = flow[col].astype(float)
 
-        features[f"{river}_zscore"]  = _weekly_zscore(s)
+        z = _weekly_zscore(s)
+        features[f"{river}_zscore"]  = z
         features[f"{river}_pct"]     = _weekly_percentile(s)
         features[f"{river}_trend"]   = _rolling_trend(s, window=30)
-        features[f"{river}_deficit"] = _cumulative_deficit(features[f"{river}_zscore"], window=90)
+        features[f"{river}_deficit"] = _cumulative_deficit(z, window=90)
+
+        # Lagged z-scores capture the causal delay (flow today → margin impact weeks later)
+        features[f"{river}_zscore_7d"]  = z.shift(7)
+        features[f"{river}_zscore_14d"] = z.shift(14)
 
     feat_df = pd.DataFrame(features)
 
@@ -210,12 +215,19 @@ def build_features(
     return feat_df.sort_index()
 
 
-def build_target(stocks: pd.DataFrame, forward_days: int) -> pd.Series:
+def build_target(
+    stocks: pd.DataFrame,
+    forward_days: int,
+    winsorize_std: float = 2.0,
+) -> pd.Series:
     """IDA excess return over XLU, shifted forward by `forward_days` trading days.
 
     We use trading-day forward returns to avoid weekend/holiday distortions.
     The target is computed on the stock DataFrame (trading days only) then
     reindexed to daily so it aligns with the flow features.
+
+    Winsorization clips extreme returns to ±winsorize_std standard deviations,
+    reducing the influence of outlier events on model training.
     """
     ida_td = stocks[TARGET_TICKER].dropna()
     xlu_td = stocks[BENCH_TICKER].dropna()
@@ -223,6 +235,11 @@ def build_target(stocks: pd.DataFrame, forward_days: int) -> pd.Series:
     ida_fwd = ida_td.shift(-forward_days) / ida_td - 1
     xlu_fwd = xlu_td.shift(-forward_days) / xlu_td - 1
     excess  = ida_fwd - xlu_fwd
+
+    if winsorize_std > 0:
+        mu = excess.mean()
+        sigma = excess.std()
+        excess = excess.clip(mu - winsorize_std * sigma, mu + winsorize_std * sigma)
 
     # Reindex to calendar days for alignment with flow data
     return excess.reindex(

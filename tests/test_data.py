@@ -126,14 +126,19 @@ class TestBuildIceFeatures:
 class TestBuildFeatures:
     def test_without_ice(self, sample_flow, sample_stocks):
         X = build_features(sample_flow, sample_stocks, ice=None)
-        # 4 rivers * 4 + 6 interaction/threshold + 2 seasonal + 2 momentum = 26
-        assert X.shape[1] == 26
+        # 4 rivers * (4 base + 2 lagged) + 6 interaction/threshold + 2 seasonal + 2 momentum = 34
+        assert X.shape[1] == 34
 
     def test_with_ice(self, sample_flow, sample_stocks, sample_ice):
         X = build_features(sample_flow, sample_stocks, ice=sample_ice)
-        assert X.shape[1] == 30  # 26 base + 4 ICE features
+        assert X.shape[1] == 38  # 34 base + 4 ICE features
         ice_cols = [c for c in X.columns if "midc" in c]
         assert len(ice_cols) == 4
+
+    def test_lagged_features_present(self, sample_flow, sample_stocks):
+        X = build_features(sample_flow, sample_stocks)
+        lagged = [c for c in X.columns if "_7d" in c or "_14d" in c]
+        assert len(lagged) == 8  # 4 rivers * 2 lags
 
     def test_no_future_leakage(self, sample_flow, sample_stocks):
         X = build_features(sample_flow, sample_stocks)

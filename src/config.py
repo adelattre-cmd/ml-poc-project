@@ -26,7 +26,7 @@ STREAMLIT_PORT = 8501
 PROJECT_TITLE = "Hydro-Alpha: USGS Streamflow → IDACORP Excess Return"
 TARGET_TICKER  = "IDA"    # IDACORP — primary Snake River hydropower utility
 BENCH_TICKER   = "XLU"   # Utilities sector ETF — benchmark to isolate sector alpha
-FORWARD_DAYS   = 20       # prediction horizon (≈ 1 trading month)
+FORWARD_DAYS   = 25       # prediction horizon (≈ 5 trading weeks, optimized via multi-horizon scan)
 
 # ── Registered models ──────────────────────────────────────────────────────────
 MODELS = {

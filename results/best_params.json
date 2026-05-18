@@ -4,18 +4,18 @@
   },
   "pca_ridge": {
     "alpha": 0.1,
-    "pca_var": 0.8
+    "pca_var": 0.9
   },
   "random_forest": {
-    "n_estimators": 300.0,
-    "max_depth": 6.0,
-    "min_samples_leaf": 60.0,
+    "n_estimators": 500.0,
+    "max_depth": 4.0,
+    "min_samples_leaf": 30.0,
     "max_features": 0.4
   },
   "xgboost": {
     "n_estimators": 200.0,
     "max_depth": 4.0,
     "learning_rate": 0.02,
-    "reg_lambda": 5.0
+    "reg_lambda": 10.0
   }
 }

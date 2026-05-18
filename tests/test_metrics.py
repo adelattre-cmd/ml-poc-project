@@ -19,7 +19,7 @@ class TestComputeMetrics:
         y_true = np.random.normal(0, 0.05, 100)
         y_pred = y_true + np.random.normal(0, 0.01, 100)
         result = compute_metrics(y_true, y_pred)
-        expected_keys = {"ic", "hit_rate", "sharpe", "rmse", "mae", "r2"}
+        expected_keys = {"ic", "hit_rate", "sharpe", "gated_sharpe", "gated_hit", "rmse", "mae", "r2"}
         assert set(result.keys()) == expected_keys
 
     def test_all_values_are_float(self):
