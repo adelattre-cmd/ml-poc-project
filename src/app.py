@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import time
 from pathlib import Path
 
 import joblib
@@ -12,10 +14,11 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
 from scipy import stats
+from sklearn.base import clone
 
 from config import (
     DATA_DIR, MODEL_METRICS_FILE, MODELS, MODELS_DIR,
-    TARGET_TICKER, BENCH_TICKER, FORWARD_DAYS,
+    TARGET_TICKER, BENCH_TICKER, FORWARD_DAYS, RESULTS_DIR,
 )
 from data import (
     build_features, build_target, load_dataset_split,
@@ -26,6 +29,7 @@ HYDRO_COLOR  = "#1d6fa5"
 RETURN_UP    = "#2a9d8f"
 RETURN_DOWN  = "#e63946"
 NEUTRAL      = "#adb5bd"
+TEST_START_TS = pd.Timestamp(TEST_START)
 
 
 # ── Cached loaders ─────────────────────────────────────────────────────────────
@@ -48,6 +52,18 @@ def get_dataset():
 def load_model(key: str):
     p = MODELS[key]["path"]
     return joblib.load(p) if Path(p).exists() else None
+
+
+@st.cache_data(show_spinner=False)
+def load_run_report() -> dict:
+    report_path = RESULTS_DIR / "run_report.json"
+    if not report_path.exists():
+        return {}
+
+    try:
+        return json.loads(report_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
 
 
 # ── Sections ───────────────────────────────────────────────────────────────────
@@ -117,8 +133,27 @@ def _streamflow(flow, stocks):
         fig.add_trace(go.Scatter(x=ida.loc[common].index, y=ida.loc[common],
                                  name="IDA price ($)", line=dict(color=RETURN_UP, width=1.5)),
                       secondary_y=True)
-        fig.add_vline(x=TEST_START, line_dash="dash", line_color="grey",
-                      annotation_text="Test start")
+        test_start_dt = TEST_START_TS.to_pydatetime()
+        fig.add_shape(
+            type="line",
+            x0=test_start_dt,
+            x1=test_start_dt,
+            y0=0,
+            y1=1,
+            xref="x",
+            yref="paper",
+            line=dict(color="grey", dash="dash"),
+        )
+        fig.add_annotation(
+            x=test_start_dt,
+            y=1,
+            xref="x",
+            yref="paper",
+            text="Test start",
+            showarrow=False,
+            yanchor="bottom",
+            font=dict(color="grey"),
+        )
         fig.update_layout(title=f"{rivers_display[river]} vs IDA (weekly)",
                           height=350, legend=dict(orientation="h"))
         fig.update_yaxes(title_text="Discharge (cfs)", secondary_y=False)
@@ -169,7 +204,7 @@ def _signal_analysis(X_all, y_all):
     )
 
     df_plot = pd.DataFrame({"x": X_all[feature], "y": y_all,
-                            "period": np.where(X_all.index < TEST_START, "Train", "Test")})
+                            "period": np.where(X_all.index < TEST_START_TS, "Train", "Test")})
     df_plot = df_plot.dropna()
 
     col1, col2 = st.columns(2)
@@ -263,12 +298,161 @@ def _model_results():
     st.plotly_chart(fig, use_container_width=True)
 
 
-def _backtest(X_test, y_test):
+def _compute_perf_stats(returns: pd.Series, holding_period: int) -> dict[str, float]:
+    if returns.empty:
+        return {
+            "total": 0.0,
+            "ann_ret": 0.0,
+            "ann_vol": 0.0,
+            "sharpe": 0.0,
+            "max_drawdown": 0.0,
+            "calmar": 0.0,
+        }
+
+    positions_per_year = 252 / holding_period
+    cum = (1 + returns).cumprod()
+    n = len(returns)
+    total = float(cum.iloc[-1] - 1)
+    ann_ret = float((cum.iloc[-1]) ** (positions_per_year / n) - 1) if n > 0 else 0.0
+    ann_vol = float(returns.std() * np.sqrt(positions_per_year))
+    sharpe = ann_ret / ann_vol if ann_vol > 0 else 0.0
+    drawdown = cum / cum.cummax() - 1
+    max_dd = float(drawdown.min()) if not drawdown.empty else 0.0
+    calmar = ann_ret / abs(max_dd) if max_dd < 0 else 0.0
+    return {
+        "total": total,
+        "ann_ret": ann_ret,
+        "ann_vol": ann_vol,
+        "sharpe": sharpe,
+        "max_drawdown": max_dd,
+        "calmar": calmar,
+    }
+
+
+def _build_entry_predictions(
+    base_model,
+    retrain_mode: str,
+    X_train: pd.DataFrame,
+    X_test: pd.DataFrame,
+    y_train: pd.Series,
+    y_test: pd.Series,
+    holding_period: int,
+    min_hist: int,
+    warmup_days: int,
+    entry_offset: int,
+) -> tuple[pd.Series, pd.Series, int]:
+    mask_trading = y_test != y_test.shift(1)
+    mask_trading.iloc[0] = True
+    X_trading = X_test[mask_trading]
+    y_trading = y_test[mask_trading]
+
+    entry_idx = np.arange(entry_offset, len(y_trading), holding_period)
+    if warmup_days > 0:
+        entry_idx = entry_idx[entry_idx >= warmup_days]
+
+    returns = y_trading.iloc[entry_idx]
+
+    if retrain_mode.startswith("Static"):
+        y_pred = pd.Series(base_model.predict(X_trading), index=X_trading.index)
+        positions = y_pred.iloc[entry_idx]
+        return positions.sort_index(), returns.loc[positions.index], 0
+
+    X_full = pd.concat([X_train, X_test]).sort_index()
+    y_full = pd.concat([y_train, y_test]).sort_index()
+
+    mask_full_trading = y_full != y_full.shift(1)
+    mask_full_trading.iloc[0] = True
+    X_full_trading = X_full[mask_full_trading]
+    y_full_trading = y_full[mask_full_trading]
+
+    preds: list[float] = []
+    pred_dates = []
+    skipped = 0
+
+    for i in entry_idx:
+        pred_date = X_trading.index[i]
+        pos_full = y_full_trading.index.get_indexer([pred_date])[0]
+        train_end_pos = pos_full - FORWARD_DAYS
+        if train_end_pos < min_hist:
+            skipped += 1
+            continue
+
+        X_fit = X_full_trading.iloc[: train_end_pos + 1]
+        y_fit = y_full_trading.iloc[: train_end_pos + 1]
+        if len(X_fit) == 0 or len(X_fit) != len(y_fit):
+            skipped += 1
+            continue
+
+        model_step = clone(base_model)
+        model_step.fit(X_fit, y_fit)
+        preds.append(float(model_step.predict(X_trading.iloc[[i]])[0]))
+        pred_dates.append(pred_date)
+
+    if not preds:
+        return pd.Series(dtype=float), pd.Series(dtype=float), skipped
+
+    positions = pd.Series(preds, index=pred_dates).sort_index()
+    returns = returns.loc[positions.index]
+    return positions, returns, skipped
+
+
+def _apply_execution_layer(
+    preds: pd.Series,
+    realized: pd.Series,
+    entry_threshold: float,
+    use_two_stage: bool,
+    confidence_ratio: float,
+    sizing_mode: str,
+    max_leverage: float,
+    cost_bps: float,
+) -> tuple[pd.Series, pd.Series, pd.Series]:
+    if preds.empty or realized.empty:
+        return pd.Series(dtype=float), pd.Series(dtype=float), pd.Series(dtype=float)
+
+    abs_pred = preds.abs()
+    score_ref = abs_pred.expanding(min_periods=10).median().shift(1)
+    score_ref = score_ref.fillna(abs_pred.median() if abs_pred.median() > 0 else 1e-6)
+    confidence_score = abs_pred / (score_ref + 1e-9)
+
+    raw_signal = np.sign(preds) * (abs_pred >= entry_threshold).astype(float)
+    if use_two_stage:
+        raw_signal = raw_signal * (confidence_score >= confidence_ratio).astype(float)
+
+    if sizing_mode == "Dynamic (scaled by confidence)":
+        size = np.clip(confidence_score / max(confidence_ratio, 1e-6), 0.0, max_leverage)
+        position = raw_signal * size
+    else:
+        position = raw_signal
+
+    turnover = position.diff().abs().fillna(position.abs())
+    gross = position * realized
+    costs = turnover * (cost_bps / 10000)
+    net = gross - costs
+    return net, gross, turnover
+
+
+def _bootstrap_sharpe_ci(returns: pd.Series, holding_period: int, n_boot: int = 500) -> tuple[float, float]:
+    if returns.empty:
+        return 0.0, 0.0
+    arr = returns.to_numpy(dtype=float)
+    if len(arr) < 5:
+        return 0.0, 0.0
+    ppy = 252 / holding_period
+    samples = []
+    rng = np.random.default_rng(42)
+    for _ in range(n_boot):
+        s = rng.choice(arr, size=len(arr), replace=True)
+        vol = float(np.std(s) * np.sqrt(ppy))
+        ann = float((np.prod(1 + s) ** (ppy / len(s))) - 1)
+        samples.append(ann / vol if vol > 0 else 0.0)
+    return float(np.percentile(samples, 5)), float(np.percentile(samples, 95))
+
+
+def _backtest(X_train, X_test, y_train, y_test):
     st.header("Signal Backtest")
     st.markdown(
-        "Long IDA / short XLU when predicted excess return > 0; "
-        "inverse when < 0. Non-overlapping positions every N trading days "
-        "(no double-counting of forward returns). **No transaction costs.**"
+        "Execution layer includes thresholding, optional 2-stage filtering, dynamic sizing, "
+        "transaction costs, and walk-forward retraining."
     )
 
     available = {k: v["name"] for k, v in MODELS.items()
@@ -277,33 +461,228 @@ def _backtest(X_test, y_test):
         st.error("Train models first: `python scripts/train.py`")
         return
 
-    key = st.selectbox("Model", list(available.keys()),
-                       format_func=lambda k: available[k])
+    setup_mode = st.radio(
+        "Setup mode",
+        ["Guided (recommended)", "Expert (manual)"],
+        horizontal=True,
+    )
+    retrain_mode = st.selectbox(
+        "Backtest mode",
+        ["Walk-forward (retrain each trade)", "Static model (no retrain)"],
+        index=0,
+    )
+
+    available_keys = list(available.keys())
+    default_model_key = "pca_ridge" if "pca_ridge" in available_keys else available_keys[0]
+    key = st.selectbox(
+        "Model",
+        available_keys,
+        index=available_keys.index(default_model_key),
+        format_func=lambda k: available[k],
+    )
+
+    if setup_mode.startswith("Guided"):
+        profile = st.selectbox(
+            "Risk profile",
+            ["Recommended", "Balanced", "Conservative", "Aggressive"],
+            index=0,
+        )
+        presets = {
+            "Recommended": {
+                "model_key": "pca_ridge",
+                "holding": 50,
+                "warmup": 40,
+                "offset": 0,
+                "threshold": 0.005,
+                "use_two_stage": True,
+                "confidence": 1.0,
+                "sizing": "Dynamic (scaled by confidence)",
+                "leverage": 1.0,
+                "cost_bps": 5.0,
+            },
+            "Conservative": {
+                "model_key": "ridge",
+                "holding": 30,
+                "warmup": 60,
+                "offset": 0,
+                "threshold": 0.008,
+                "use_two_stage": True,
+                "confidence": 1.2,
+                "sizing": "Binary (-1/0/+1)",
+                "leverage": 1.0,
+                "cost_bps": 7.0,
+            },
+            "Balanced": {
+                "model_key": "pca_ridge",
+                "holding": 25,
+                "warmup": 40,
+                "offset": 0,
+                "threshold": 0.005,
+                "use_two_stage": True,
+                "confidence": 1.0,
+                "sizing": "Dynamic (scaled by confidence)",
+                "leverage": 1.0,
+                "cost_bps": 5.0,
+            },
+            "Aggressive": {
+                "model_key": "ridge",
+                "holding": 20,
+                "warmup": 20,
+                "offset": 0,
+                "threshold": 0.003,
+                "use_two_stage": False,
+                "confidence": 0.9,
+                "sizing": "Dynamic (scaled by confidence)",
+                "leverage": 1.3,
+                "cost_bps": 3.0,
+            },
+        }
+        cfg = presets[profile]
+        if cfg["model_key"] in available:
+            key = cfg["model_key"]
+        holding_period = cfg["holding"]
+        warmup_days = cfg["warmup"]
+        entry_offset = cfg["offset"]
+        entry_threshold = cfg["threshold"]
+        use_two_stage = cfg["use_two_stage"]
+        confidence_ratio = cfg["confidence"]
+        sizing_mode = cfg["sizing"]
+        max_leverage = cfg["leverage"]
+        cost_bps = cfg["cost_bps"]
+        st.caption(
+            f"Preset `{profile}` applied: hold={holding_period}, threshold={entry_threshold:.3f}, "
+            f"confidence={confidence_ratio:.1f}, cost={cost_bps:.1f} bps."
+        )
+    else:
+        col_cfg1, col_cfg2, col_cfg3 = st.columns(3)
+        with col_cfg1:
+            holding_period = st.slider("Holding period (trading days)", 5, 60, FORWARD_DAYS, 5)
+            warmup_days = st.slider("Warm-up before first trade (trading days)", 0, 252, 40, 5)
+            entry_offset = st.slider("Entry offset (robustness)", 0, max(0, holding_period - 1), 0, 1)
+        with col_cfg2:
+            entry_threshold = st.slider("Entry threshold on |prediction|", 0.0, 0.05, 0.005, 0.001)
+            use_two_stage = st.checkbox("Use 2-stage filter (confidence gate)", value=True)
+            confidence_ratio = st.slider("Confidence ratio threshold", 0.5, 2.0, 1.0, 0.1)
+        with col_cfg3:
+            sizing_mode = st.selectbox("Position sizing", ["Binary (-1/0/+1)", "Dynamic (scaled by confidence)"])
+            max_leverage = st.slider("Max position leverage (dynamic mode)", 0.5, 2.0, 1.0, 0.1)
+            cost_bps = st.slider("Transaction cost (bps per turnover unit)", 0.0, 50.0, 5.0, 0.5)
+
     model = load_model(key)
     if model is None:
         return
 
-    holding_period = st.slider(
-        "Holding period (trading days)", min_value=5, max_value=60,
-        value=FORWARD_DAYS, step=5,
+    min_hist = max(120, FORWARD_DAYS * 6)
+    if st.button("Auto-select best model + holding (fast)"):
+        scan_models = [mk for mk in available_keys if mk != "xgboost"]
+        scan_holdings = [15, 20, 25, 30, 35, 40, 45, 50]
+        scan_offsets = [0, 1, 2]
+        best = None
+        total_jobs = sum(len([o for o in scan_offsets if o < hp]) for hp in scan_holdings) * len(scan_models)
+        done_jobs = 0
+        time_budget_s = 25.0
+        started = time.time()
+        progress = st.progress(0, text="Fast scan in progress...")
+        stopped_early = False
+        with st.spinner("Searching robust settings (fast scan)..."):
+            for mk in scan_models:
+                m = load_model(mk)
+                if m is None:
+                    continue
+                for hp in scan_holdings:
+                    sharpes = []
+                    for off in [o for o in scan_offsets if o < hp]:
+                        if time.time() - started > time_budget_s:
+                            stopped_early = True
+                            break
+                        p, r, _ = _build_entry_predictions(
+                            base_model=m,
+                            retrain_mode=retrain_mode,
+                            X_train=X_train,
+                            X_test=X_test,
+                            y_train=y_train,
+                            y_test=y_test,
+                            holding_period=hp,
+                            min_hist=min_hist,
+                            warmup_days=warmup_days,
+                            entry_offset=off,
+                        )
+                        if p.empty or r.empty:
+                            continue
+                        net, _, _ = _apply_execution_layer(
+                            preds=p,
+                            realized=r,
+                            entry_threshold=entry_threshold,
+                            use_two_stage=use_two_stage,
+                            confidence_ratio=confidence_ratio,
+                            sizing_mode=sizing_mode,
+                            max_leverage=max_leverage,
+                            cost_bps=cost_bps,
+                        )
+                        if net.empty:
+                            continue
+                        sharpes.append(_compute_perf_stats(net, hp)["sharpe"])
+                        done_jobs += 1
+                        if total_jobs > 0:
+                            pct = min(100, int((done_jobs / total_jobs) * 100))
+                            progress.progress(pct, text=f"Fast scan in progress... {pct}%")
+                    if stopped_early:
+                        break
+                    if not sharpes:
+                        continue
+                    score = float(np.median(sharpes))
+                    if best is None or score > best["score"]:
+                        best = {"model": mk, "holding": hp, "score": score}
+                if stopped_early:
+                    break
+        progress.empty()
+        if best is not None:
+            key = best["model"]
+            holding_period = int(best["holding"])
+            model = load_model(key)
+            msg = (
+                f"Recommended settings: model={available[key]}, holding={holding_period}, "
+                f"median Sharpe={best['score']:+.3f}."
+            )
+            if stopped_early:
+                st.warning(msg + " Returned best partial result (time budget reached).")
+            else:
+                st.success(msg)
+        else:
+            st.warning("No valid combination found in fast scan under current filters.")
+
+    preds, returns, skipped = _build_entry_predictions(
+        base_model=model,
+        retrain_mode=retrain_mode,
+        X_train=X_train,
+        X_test=X_test,
+        y_train=y_train,
+        y_test=y_test,
+        holding_period=holding_period,
+        min_hist=min_hist,
+        warmup_days=warmup_days,
+        entry_offset=entry_offset,
+    )
+    if preds.empty or returns.empty:
+        st.error("Backtest could not run: no valid entry points under current settings.")
+        return
+
+    net_ret, gross_ret, turnover = _apply_execution_layer(
+        preds=preds,
+        realized=returns,
+        entry_threshold=entry_threshold,
+        use_two_stage=use_two_stage,
+        confidence_ratio=confidence_ratio,
+        sizing_mode=sizing_mode,
+        max_leverage=max_leverage,
+        cost_bps=cost_bps,
     )
 
-    # Filter to trading days only (remove weekend/holiday forward-fills)
-    mask_trading = y_test != y_test.shift(1)
-    mask_trading.iloc[0] = True
-    X_trading = X_test[mask_trading]
-    y_trading = y_test[mask_trading]
+    if net_ret.empty:
+        st.error("No trades after filters. Lower threshold/confidence gate.")
+        return
 
-    y_pred = pd.Series(model.predict(X_trading), index=X_trading.index)
-
-    # Non-overlapping positions every holding_period trading days
-    entry_idx = np.arange(0, len(y_trading), holding_period)
-    positions = y_pred.iloc[entry_idx]
-    returns = y_trading.iloc[entry_idx]
-    signal = np.sign(positions)
-    ls_ret = signal * returns
-
-    cum_signal = (1 + ls_ret).cumprod()
+    cum_signal = (1 + net_ret).cumprod()
     cum_buynhold = (1 + returns).cumprod()
 
     fig = go.Figure()
@@ -320,20 +699,179 @@ def _backtest(X_test, y_test):
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    col1, col2, col3, col4 = st.columns(4)
-    n_positions = len(ls_ret)
-    positions_per_year = 252 / holding_period
-    total = float(cum_signal.iloc[-1] - 1)
-    ann_ret = float((cum_signal.iloc[-1]) ** (positions_per_year / n_positions) - 1)
-    vol = float(ls_ret.std() * np.sqrt(positions_per_year))
-    sharpe = ann_ret / vol if vol > 0 else 0
-    col1.metric("Total return", f"{total:+.1%}")
-    col2.metric("Ann. return", f"{ann_ret:+.1%}")
-    col3.metric("Ann. volatility", f"{vol:.1%}")
-    col4.metric("Sharpe ratio", f"{sharpe:+.2f}")
+    stats_net = _compute_perf_stats(net_ret, holding_period)
+    ci_low, ci_high = _bootstrap_sharpe_ci(net_ret, holding_period, n_boot=300)
+    turnover_annual = float(turnover.mean() * (252 / holding_period)) if not turnover.empty else 0.0
 
-    st.caption(f"{n_positions} non-overlapping positions "
-               f"(~{positions_per_year:.0f}/year × {n_positions/positions_per_year:.1f} years)")
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Total return (net)", f"{stats_net['total']:+.1%}")
+    col2.metric("Ann. return (net)", f"{stats_net['ann_ret']:+.1%}")
+    col3.metric("Sharpe (net)", f"{stats_net['sharpe']:+.2f}")
+    col4.metric("Max drawdown", f"{stats_net['max_drawdown']:.1%}")
+
+    col5, col6, col7, col8 = st.columns(4)
+    col5.metric("Calmar ratio", f"{stats_net['calmar']:+.2f}")
+    col6.metric("Ann. volatility", f"{stats_net['ann_vol']:.1%}")
+    col7.metric("Turnover/year", f"{turnover_annual:.2f}")
+    col8.metric("Sharpe 90% CI", f"[{ci_low:+.2f}, {ci_high:+.2f}]")
+
+    # Baseline naive strategy: sign of snake_zscore (if available), else sign of target lag-1.
+    mask_trading = y_test != y_test.shift(1)
+    mask_trading.iloc[0] = True
+    X_trading = X_test[mask_trading]
+    y_trading = y_test[mask_trading]
+    entry_idx = np.arange(entry_offset, len(y_trading), holding_period)
+    if warmup_days > 0:
+        entry_idx = entry_idx[entry_idx >= warmup_days]
+    base_returns = y_trading.iloc[entry_idx]
+    if "snake_zscore" in X_trading.columns:
+        base_signal = np.sign(X_trading["snake_zscore"].iloc[entry_idx]).astype(float)
+    else:
+        base_signal = np.sign(y_trading.shift(1).iloc[entry_idx]).fillna(0.0).astype(float)
+    baseline_ret = base_signal * base_returns
+    baseline_ret = baseline_ret.loc[net_ret.index.intersection(baseline_ret.index)]
+    net_aligned = net_ret.loc[baseline_ret.index]
+    baseline_stats = _compute_perf_stats(baseline_ret, holding_period)
+
+    st.markdown("**Robustness Checks**")
+    r1, r2 = st.columns(2)
+    with r1:
+        st.metric("Baseline Sharpe", f"{baseline_stats['sharpe']:+.2f}")
+        st.metric("Baseline total return", f"{baseline_stats['total']:+.1%}")
+    with r2:
+        diff = stats_net["sharpe"] - baseline_stats["sharpe"]
+        st.metric("Sharpe uplift vs baseline", f"{diff:+.2f}")
+        outperf = float((net_aligned - baseline_ret).sum())
+        st.metric("Cumulative excess vs baseline", f"{outperf:+.1%}")
+
+    # Sub-period stability table
+    seg = pd.DataFrame({"ret": net_ret})
+    seg["period"] = pd.cut(
+        seg.index.year,
+        bins=[2018, 2020, 2022, 2024, 2027],
+        labels=["2019-2020", "2021-2022", "2023-2024", "2025-2026"],
+        right=True,
+    )
+    sub_rows = []
+    for label, grp in seg.groupby("period", observed=True):
+        if grp.empty:
+            continue
+        s = _compute_perf_stats(grp["ret"], holding_period)
+        sub_rows.append(
+            {
+                "period": str(label),
+                "trades": int(len(grp)),
+                "total": s["total"],
+                "ann_ret": s["ann_ret"],
+                "sharpe": s["sharpe"],
+                "max_dd": s["max_drawdown"],
+            }
+        )
+    if sub_rows:
+        st.dataframe(
+            pd.DataFrame(sub_rows).style.format(
+                {"total": "{:+.2%}", "ann_ret": "{:+.2%}", "sharpe": "{:+.2f}", "max_dd": "{:.2%}"}
+            ),
+            use_container_width=True,
+        )
+
+    st.markdown("**Robust Model/Holding Scan (multi-offset median Sharpe)**")
+    if st.button("Run robust scan"):
+        scan_models = [
+            mk for mk, cfg in MODELS.items() if Path(cfg["path"]).exists() and mk != "xgboost"
+        ]
+        scan_holdings = [10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60]
+        offsets = [0, 1, 2]
+        results = []
+        total_jobs = sum(len([o for o in offsets if o < hp]) for hp in scan_holdings) * len(scan_models)
+        done_jobs = 0
+        time_budget_s = 30.0
+        started = time.time()
+        progress = st.progress(0, text="Robust scan in progress...")
+        stopped_early = False
+        with st.spinner("Running scan..."):
+            for mk in scan_models:
+                m = load_model(mk)
+                if m is None:
+                    continue
+                for hp in scan_holdings:
+                    sharpes = []
+                    for off in [o for o in offsets if o < hp]:
+                        if time.time() - started > time_budget_s:
+                            stopped_early = True
+                            break
+                        p, r, _ = _build_entry_predictions(
+                            base_model=m,
+                            retrain_mode=retrain_mode,
+                            X_train=X_train,
+                            X_test=X_test,
+                            y_train=y_train,
+                            y_test=y_test,
+                            holding_period=hp,
+                            min_hist=min_hist,
+                            warmup_days=warmup_days,
+                            entry_offset=off,
+                        )
+                        if p.empty or r.empty:
+                            continue
+                        net, _, _ = _apply_execution_layer(
+                            preds=p,
+                            realized=r,
+                            entry_threshold=entry_threshold,
+                            use_two_stage=use_two_stage,
+                            confidence_ratio=confidence_ratio,
+                            sizing_mode=sizing_mode,
+                            max_leverage=max_leverage,
+                            cost_bps=cost_bps,
+                        )
+                        if net.empty:
+                            continue
+                        sharpes.append(_compute_perf_stats(net, hp)["sharpe"])
+                        done_jobs += 1
+                        if total_jobs > 0:
+                            pct = min(100, int((done_jobs / total_jobs) * 100))
+                            progress.progress(pct, text=f"Robust scan in progress... {pct}%")
+                    if stopped_early:
+                        break
+                    if sharpes:
+                        results.append(
+                            {
+                                "model": mk,
+                                "holding": hp,
+                                "median_sharpe": float(np.median(sharpes)),
+                                "min_sharpe": float(np.min(sharpes)),
+                                "max_sharpe": float(np.max(sharpes)),
+                                "n_offsets": int(len(sharpes)),
+                            }
+                        )
+                if stopped_early:
+                    break
+        progress.empty()
+        if results:
+            scan_df = pd.DataFrame(results).sort_values("median_sharpe", ascending=False)
+            st.dataframe(
+                scan_df.style.format(
+                    {"median_sharpe": "{:+.3f}", "min_sharpe": "{:+.3f}", "max_sharpe": "{:+.3f}"}
+                ),
+                use_container_width=True,
+            )
+            best = scan_df.iloc[0]
+            st.success(
+                f"Best robust combo: {best['model']} with holding={int(best['holding'])} "
+                f"(median Sharpe {best['median_sharpe']:+.3f})."
+            )
+            if stopped_early:
+                st.info("Robust scan stopped at time budget; showing best partial ranking.")
+
+    st.caption(
+        f"{len(net_ret)} non-overlapping entries | mode: {retrain_mode} | "
+        f"threshold={entry_threshold:.3f} | cost={cost_bps:.1f} bps"
+    )
+    if retrain_mode.startswith("Walk-forward"):
+        st.caption(
+            f"Walk-forward uses train+elapsed test data only. "
+            f"Skipped entries due to insufficient history: {skipped}."
+        )
 
 
 def _feature_importance():
@@ -373,6 +911,193 @@ def _feature_importance():
     )
 
 
+def _executive_demo(X_train, X_test, y_train, y_test, X_all, y_all):
+    st.header("Demo Mode: 5-Minute Presentation")
+    st.markdown(
+        "Use this guided script to present the project end-to-end with a clear story "
+        "for non-technical or mixed audiences."
+    )
+
+    step = st.radio(
+        "Presentation step",
+        [
+            "1) Business problem",
+            "2) Data and signal intuition",
+            "3) Feature design logic",
+            "4) Model comparison",
+            "5) Backtest and decision",
+        ],
+        horizontal=True,
+    )
+
+    if step == "1) Business problem":
+        st.subheader("Why this matters")
+        st.write(
+            f"We predict whether `{TARGET_TICKER}` will outperform `{BENCH_TICKER}` "
+            f"over the next {FORWARD_DAYS} trading days."
+        )
+        st.write(
+            "Hypothesis: river-flow anomalies impact hydropower costs, then earnings, "
+            "then relative stock performance."
+        )
+        st.info(
+            "Key message: this is an alternative-data signal built from public USGS data."
+        )
+
+    elif step == "2) Data and signal intuition":
+        st.subheader("What data we use")
+        st.write(
+            "Inputs: daily USGS streamflow for 4 river gauges + daily adjusted prices "
+            "for IDA and XLU."
+        )
+        st.write(
+            "Target: forward excess return (IDA - XLU). Chronological split avoids leakage."
+        )
+
+        probe_feature = "snake_zscore" if "snake_zscore" in X_all.columns else X_all.columns[0]
+        tmp = pd.DataFrame(
+            {
+                "feature": X_all[probe_feature],
+                "target": y_all,
+            }
+        ).dropna()
+        quick_ic = stats.spearmanr(tmp["feature"], tmp["target"]).statistic
+        st.metric("Example signal IC", f"{quick_ic:+.4f}", help=f"Feature: {probe_feature}")
+        st.caption("IC > 0 suggests useful rank-ordering information in the signal.")
+
+    elif step == "3) Feature design logic":
+        st.subheader("How raw flow becomes model-ready features")
+        st.markdown(
+            "- **Z-score** removes seasonality and keeps anomalies only.\n"
+            "- **Percentile** captures rarity (historically dry/wet conditions).\n"
+            "- **Trend + deficit** capture persistence and regime pressure.\n"
+            "- **Stock relative momentum** adds market context."
+        )
+        st.write(f"Feature count: {X_train.shape[1]}")
+        st.code("\n".join(list(X_train.columns[:12]) + (["..."] if X_train.shape[1] > 12 else [])))
+
+    elif step == "4) Model comparison":
+        st.subheader("Which model is best on unseen data?")
+        if not MODEL_METRICS_FILE.exists():
+            st.warning("Run `python scripts/main.py` first to generate model metrics.")
+            return
+        df = pd.read_csv(MODEL_METRICS_FILE).sort_values("ic", ascending=False)
+        st.dataframe(df, use_container_width=True)
+        best = df.iloc[0]
+        st.success(
+            f"Best model by IC: {best['model_name']} (IC={best['ic']:+.4f}, "
+            f"Hit Rate={best['hit_rate']:.1%})."
+        )
+
+    elif step == "5) Backtest and decision":
+        st.subheader("So what would we do in production?")
+        st.markdown(
+            "- Use model sign for directional L/S allocation versus benchmark.\n"
+            "- Retrain on rolling windows and monitor IC drift by month/regime.\n"
+            "- Add costs, slippage and risk limits before live deployment."
+        )
+        st.write(
+            f"Current dataset: {len(X_train):,} train rows, {len(X_test):,} test rows, "
+            f"horizon {FORWARD_DAYS} trading days."
+        )
+        st.info("Decision framing: keep as research signal, then move to robust validation.")
+
+
+def _full_process_tab(X_train, X_test, y_train, y_test):
+    st.header("Project Walkthrough: End-to-End Process")
+    st.markdown(
+        "This tab explains each technical step, the reasoning behind it, and the artifacts "
+        "you can inspect to present the project clearly."
+    )
+
+    report = load_run_report()
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Train rows", f"{len(X_train):,}")
+        st.metric("Test rows", f"{len(X_test):,}")
+    with col2:
+        st.metric("Features", X_train.shape[1])
+        st.metric("Target horizon", f"{FORWARD_DAYS}d")
+    with col3:
+        st.metric("Train period end", str(X_train.index.max().date()))
+        st.metric("Test period start", str(X_test.index.min().date()))
+
+    with st.expander("1) Problem framing and objective", expanded=True):
+        st.write(
+            f"Objective: predict the forward excess return of `{TARGET_TICKER}` versus "
+            f"`{BENCH_TICKER}` using USGS streamflow anomalies."
+        )
+        st.write(
+            "Rationale: river flow anomalies can impact hydropower generation costs, then "
+            "margins, then relative equity performance."
+        )
+
+    with st.expander("2) Data sources and assumptions"):
+        st.write("Files used:")
+        st.code(
+            "\n".join(
+                [
+                    f"- {FLOW_FILE}",
+                    f"- {STOCKS_FILE}",
+                ]
+            )
+        )
+        st.write(
+            "Main assumptions: chronological split (no leakage), no target shuffling, "
+            "and forward returns computed on trading days."
+        )
+
+    with st.expander("3) Feature engineering choices"):
+        st.write("Per river: z-score, percentile, trend, cumulative deficit.")
+        st.write("Cross-sectional additions: seasonal encoding + stock relative momentum.")
+        st.write(
+            "Reasoning: isolate anomalies from seasonality, capture persistence of drought, "
+            "and keep a market-relative stock context."
+        )
+
+    with st.expander("4) Modeling and evaluation strategy"):
+        st.write("Registered models and rationale:")
+        for key, cfg in MODELS.items():
+            st.markdown(f"- **{cfg.get('name', key)}**: {cfg.get('description', '').strip()}")
+        st.write(
+            "Evaluation metrics combine signal quality (IC, hit rate, Sharpe) and "
+            "regression quality (RMSE, MAE, R2)."
+        )
+
+    with st.expander("5) Backtest logic and limitations"):
+        st.write(
+            "Backtest rule: long when predicted excess return > 0, short otherwise; "
+            "non-overlapping positions over holding windows."
+        )
+        st.write(
+            "Limitations to mention in presentation: no transaction costs, no slippage, "
+            "and no capacity constraints."
+        )
+
+    with st.expander("6) Reproducible run artifacts"):
+        if MODEL_METRICS_FILE.exists():
+            st.success(f"Metrics file available: {MODEL_METRICS_FILE}")
+        else:
+            st.warning("Metrics file missing. Run `python scripts/main.py`.")
+
+        if report:
+            st.write("Last orchestration report (`results/run_report.json`):")
+            st.json(report)
+        else:
+            st.info(
+                "Run report not found yet. It will be generated by `python scripts/main.py`."
+            )
+
+    with st.expander("7) Reflection and next improvements"):
+        st.markdown(
+            "- Validate robustness with rolling/expanding walk-forward retraining.\n"
+            "- Add realistic costs and turnover controls in backtests.\n"
+            "- Stress-test signal under drought/non-drought macro regimes.\n"
+            "- Add CI tests for data contracts and model artifact checks."
+        )
+
+
 # ── Entry point ────────────────────────────────────────────────────────────────
 def build_app() -> None:
     st.set_page_config(page_title="Hydro-Alpha", page_icon="💧", layout="wide")
@@ -386,15 +1111,17 @@ def build_app() -> None:
     X_train, X_test, y_train, y_test, X_all, y_all = get_dataset()
 
     tabs = st.tabs([
-        "Overview", "Streamflow", "Signal Analysis",
+        "Overview", "Demo Mode", "Process Walkthrough", "Streamflow", "Signal Analysis",
         "Model Results", "Backtest", "Feature Importance",
     ])
     with tabs[0]: _overview()
-    with tabs[1]: _streamflow(flow, stocks)
-    with tabs[2]: _signal_analysis(X_all, y_all)
-    with tabs[3]: _model_results()
-    with tabs[4]: _backtest(X_test, y_test)
-    with tabs[5]: _feature_importance()
+    with tabs[1]: _executive_demo(X_train, X_test, y_train, y_test, X_all, y_all)
+    with tabs[2]: _full_process_tab(X_train, X_test, y_train, y_test)
+    with tabs[3]: _streamflow(flow, stocks)
+    with tabs[4]: _signal_analysis(X_all, y_all)
+    with tabs[5]: _model_results()
+    with tabs[6]: _backtest(X_train, X_test, y_train, y_test)
+    with tabs[7]: _feature_importance()
 
 
 if __name__ == "__main__":

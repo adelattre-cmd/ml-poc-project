@@ -196,6 +196,13 @@ This is used when `scripts/main.py` launches Streamlit so modules inside `src/` 
 python scripts/main.py
 ```
 
+Optional flags:
+
+```bash
+python scripts/main.py --force-train   # retrain before evaluation
+python scripts/main.py --skip-train    # fail if model files are missing
+```
+
 ## Output Produced by the Template
 
 After a successful run, you should have:

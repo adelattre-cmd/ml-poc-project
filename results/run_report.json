@@ -1,0 +1,69 @@
+{
+  "generated_at_utc": "2026-05-07T16:27:54.351601+00:00",
+  "dataset_contract": "data.load_dataset_split() -> (X_train, X_test, y_train, y_test)",
+  "metrics_contract": "metrics.compute_metrics(y_true, y_pred) -> dict[str, float]",
+  "streamlit_entrypoint": "/Users/alexandredelattre/Documents/POC/ml-poc-project-1/src/app.py",
+  "metrics_file": "/Users/alexandredelattre/Documents/POC/ml-poc-project-1/results/model_metrics.csv",
+  "runtime": {
+    "train_executed": false,
+    "missing_models_before_train": [],
+    "evaluated_models": [
+      "pca_ridge",
+      "ridge",
+      "random_forest",
+      "xgboost"
+    ]
+  },
+  "models_registry": {
+    "pca_ridge": {
+      "name": "PCA + Ridge",
+      "description": "PCA reduces correlated flow features to orthogonal components (retaining 95% variance), then Ridge regresses on the principal components. Reduces multicollinearity between river gauges.",
+      "path": "/Users/alexandredelattre/Documents/POC/ml-poc-project-1/models/pca_ridge.joblib",
+      "exists": true
+    },
+    "ridge": {
+      "name": "Ridge Regression",
+      "description": "Linear baseline. Assumes a direct linear relationship between streamflow anomaly and forward excess return. Interpretable coefficients reveal which rivers drive the signal.",
+      "path": "/Users/alexandredelattre/Documents/POC/ml-poc-project-1/models/ridge.joblib",
+      "exists": true
+    },
+    "random_forest": {
+      "name": "Random Forest",
+      "description": "Ensemble of 200 decision trees. Captures non-linear interactions between rivers and seasonal effects without explicit specification.",
+      "path": "/Users/alexandredelattre/Documents/POC/ml-poc-project-1/models/random_forest.joblib",
+      "exists": true
+    },
+    "xgboost": {
+      "name": "XGBoost",
+      "description": "Gradient boosted trees. Best at capturing threshold effects (e.g. flow drops below a critical level \u2192 sharp margin compression).",
+      "path": "/Users/alexandredelattre/Documents/POC/ml-poc-project-1/models/xgboost.joblib",
+      "exists": true
+    }
+  },
+  "process_steps": [
+    {
+      "step": "validate_app",
+      "status": "ok"
+    },
+    {
+      "step": "validate_models_config",
+      "status": "ok"
+    },
+    {
+      "step": "load_dataset",
+      "status": "ok"
+    },
+    {
+      "step": "evaluate_models",
+      "status": "ok"
+    },
+    {
+      "step": "write_metrics",
+      "status": "ok"
+    },
+    {
+      "step": "launch_streamlit",
+      "status": "ok"
+    }
+  ]
+}

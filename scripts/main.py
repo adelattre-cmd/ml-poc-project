@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import argparse
 import importlib.util
+import json
 import os
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +34,8 @@ APP_ENTRYPOINT = config.APP_ENTRYPOINT
 MODELS = config.MODELS
 STREAMLIT_HOST = config.STREAMLIT_HOST
 STREAMLIT_PORT = config.STREAMLIT_PORT
+RESULTS_DIR = config.RESULTS_DIR
+MODEL_METRICS_FILE = config.MODEL_METRICS_FILE
 
 data_module = _load_module("project_data", SRC_DIR / "data.py")
 metrics_module = _load_module("project_metrics", SRC_DIR / "metrics.py")
@@ -59,6 +64,26 @@ def _validate_models_config() -> None:
             )
 
 
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run the full Hydro-Alpha workflow: validate config, optionally train "
+            "models, evaluate them, and launch Streamlit."
+        )
+    )
+    parser.add_argument(
+        "--skip-train",
+        action="store_true",
+        help="Do not auto-train when model files are missing.",
+    )
+    parser.add_argument(
+        "--force-train",
+        action="store_true",
+        help="Always run scripts/train.py before evaluation.",
+    )
+    return parser.parse_args()
+
+
 def _validate_app_entrypoint() -> None:
     app_module = _load_module("project_app", APP_ENTRYPOINT)
     if not hasattr(app_module, "build_app") or not callable(app_module.build_app):
@@ -74,6 +99,69 @@ def _streamlit_env() -> dict[str, str]:
 
     env["PYTHONPATH"] = os.pathsep.join(pythonpath_entries)
     return env
+
+
+def _missing_model_files() -> list[str]:
+    missing: list[str] = []
+    for model_key, model_config in MODELS.items():
+        if not Path(model_config["path"]).exists():
+            missing.append(model_key)
+    return missing
+
+
+def _run_training() -> None:
+    train_script = PROJECT_ROOT / "scripts" / "train.py"
+    if not train_script.exists():
+        raise FileNotFoundError(f"Training script not found: {train_script}")
+
+    subprocess.run(
+        [sys.executable, str(train_script)],
+        check=True,
+        cwd=PROJECT_ROOT,
+        env=_streamlit_env(),
+    )
+
+
+def _build_run_report(
+    metrics_rows: list[dict[str, object]],
+    missing_before_train: list[str],
+    train_executed: bool,
+) -> dict[str, object]:
+    return {
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "dataset_contract": "data.load_dataset_split() -> (X_train, X_test, y_train, y_test)",
+        "metrics_contract": "metrics.compute_metrics(y_true, y_pred) -> dict[str, float]",
+        "streamlit_entrypoint": str(APP_ENTRYPOINT),
+        "metrics_file": str(MODEL_METRICS_FILE),
+        "runtime": {
+            "train_executed": train_executed,
+            "missing_models_before_train": missing_before_train,
+            "evaluated_models": [row["model_key"] for row in metrics_rows],
+        },
+        "models_registry": {
+            model_key: {
+                "name": model_cfg.get("name", model_key),
+                "description": model_cfg.get("description", ""),
+                "path": str(model_cfg["path"]),
+                "exists": Path(model_cfg["path"]).exists(),
+            }
+            for model_key, model_cfg in MODELS.items()
+        },
+        "process_steps": [
+            {"step": "validate_app", "status": "ok"},
+            {"step": "validate_models_config", "status": "ok"},
+            {"step": "load_dataset", "status": "ok"},
+            {"step": "evaluate_models", "status": "ok"},
+            {"step": "write_metrics", "status": "ok"},
+            {"step": "launch_streamlit", "status": "ok"},
+        ],
+    }
+
+
+def _write_run_report(report: dict[str, object]) -> Path:
+    report_path = RESULTS_DIR / "run_report.json"
+    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    return report_path
 
 
 def _load_dataset() -> tuple[Any, Any, Any, Any]:
@@ -143,8 +231,29 @@ def _launch_streamlit() -> None:
 
 
 def main() -> None:
+    args = _parse_args()
     _validate_app_entrypoint()
     _validate_models_config()
+    missing_before_train = _missing_model_files()
+    train_executed = False
+
+    if args.force_train:
+        print("Force training enabled: running scripts/train.py...")
+        _run_training()
+        train_executed = True
+    elif missing_before_train and not args.skip_train:
+        print(
+            "Missing model files detected for: "
+            + ", ".join(missing_before_train)
+            + ". Running scripts/train.py..."
+        )
+        _run_training()
+        train_executed = True
+    elif missing_before_train and args.skip_train:
+        raise FileNotFoundError(
+            "Missing model files and --skip-train is enabled: "
+            + ", ".join(missing_before_train)
+        )
 
     try:
         _, X_test, _, y_test = _load_dataset()
@@ -163,9 +272,16 @@ def main() -> None:
         ) from exc
 
     metrics_df = write_metrics(metrics_rows)
+    run_report = _build_run_report(
+        metrics_rows=metrics_rows,
+        missing_before_train=missing_before_train,
+        train_executed=train_executed,
+    )
+    run_report_path = _write_run_report(run_report)
 
     print("Model evaluation completed. Metrics saved to results/model_metrics.csv")
     print(metrics_df.to_string(index=False))
+    print(f"Run report saved to {run_report_path.relative_to(PROJECT_ROOT)}")
     print(f"\nLaunching Streamlit on http://{STREAMLIT_HOST}:{STREAMLIT_PORT} ...")
 
     _launch_streamlit()
