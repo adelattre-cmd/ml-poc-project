@@ -3,6 +3,7 @@
 Builds a supervised ML dataset from:
   - USGS daily streamflow (Columbia, Snake, Willamette, Deschutes rivers)
   - IDACORP (IDA) and XLU adjusted close prices
+  - ICE MID-C electricity spot prices (optional — see USE_ICE_FEATURES)
 
 Target:
   IDA excess return over XLU, forward FORWARD_DAYS trading days.
@@ -16,6 +17,19 @@ Feature engineering:
                       (0 = historically driest, 1 = historically wettest)
     - flow_trend    : 30-day rolling slope (momentum in flow)
     - flow_deficit  : 90-day cumulative z-score (measures sustained drought)
+  ICE electricity features:
+    - midc_zscore   : seasonally-adjusted MID-C price anomaly
+    - midc_vol_30d  : 30-day rolling volatility of MID-C prices
+    - midc_trend    : 30-day rolling slope of MID-C prices
+    - midc_spike    : binary flag for price > 90th percentile within calendar week
+  Cross-river interaction features:
+    - snake_columbia_ratio : Snake/Columbia flow ratio (hydropower capacity proxy)
+    - min_zscore           : worst drought signal across all 4 rivers
+    - mean_deficit         : average sustained drought across all rivers
+    - drought_breadth      : fraction of rivers with z-score < -1 (systemic stress)
+  Non-linear threshold features:
+    - snake_drought_flag   : 1 when Snake z-score < -1 (critical level for IDA)
+    - deficit_extreme      : 1 when Snake 90d deficit < -20 (severe sustained drought)
   Plus:
     - sin/cos week-of-year encoding (residual seasonality signal)
     - IDA momentum  : 20-day return, captures stock trend
@@ -30,11 +44,19 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
+import os
+
 from config import DATA_DIR, FORWARD_DAYS, TARGET_TICKER, BENCH_TICKER
 
 HYDRO_DIR    = DATA_DIR / "raw" / "hydro"
 FLOW_FILE    = HYDRO_DIR / "usgs_streamflow_daily.csv"
 STOCKS_FILE  = HYDRO_DIR / "stock_prices_daily.csv"
+ICE_FILE     = HYDRO_DIR / "ice_midc_daily.csv"
+
+# ICE features are available but disabled by default: walk-forward CV showed
+# they degrade IC in 4/5 folds (signal is redundant with streamflow z-scores).
+# Set USE_ICE_FEATURES=1 to enable.
+USE_ICE_FEATURES = os.environ.get("USE_ICE_FEATURES", "0") == "1"
 
 RIVERS = ["columbia", "snake", "willamette", "deschutes"]
 
@@ -95,9 +117,38 @@ def _cumulative_deficit(zscore: pd.Series, window: int = 90) -> pd.Series:
     return zscore.rolling(window, min_periods=30).sum()
 
 
+# ── ICE electricity feature helpers ───────────────────────────────────────────
+
+def _build_ice_features(ice: pd.DataFrame) -> pd.DataFrame:
+    """Build electricity price features from ICE MID-C data."""
+    price = ice["midc_price"].astype(float)
+    feats: dict[str, pd.Series] = {}
+
+    feats["midc_zscore"] = _weekly_zscore(price)
+    feats["midc_vol_30d"] = price.pct_change(fill_method=None).rolling(30, min_periods=15).std() * np.sqrt(252)
+    feats["midc_trend"] = _rolling_trend(price, window=30)
+
+    week = price.index.isocalendar().week.astype(int)
+    spike = price.copy() * np.nan
+    for w in range(1, 54):
+        mask = week == w
+        vals = price[mask].dropna()
+        if len(vals) < 10:
+            continue
+        p90 = vals.quantile(0.90)
+        spike[mask] = (price[mask] > p90).astype(float)
+    feats["midc_spike"] = spike
+
+    return pd.DataFrame(feats)
+
+
 # ── Main feature builder ───────────────────────────────────────────────────────
 
-def build_features(flow: pd.DataFrame, stocks: pd.DataFrame) -> pd.DataFrame:
+def build_features(
+    flow: pd.DataFrame,
+    stocks: pd.DataFrame,
+    ice: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     """Assemble the full feature matrix aligned to trading days."""
     features = {}
 
@@ -113,6 +164,36 @@ def build_features(flow: pd.DataFrame, stocks: pd.DataFrame) -> pd.DataFrame:
         features[f"{river}_deficit"] = _cumulative_deficit(features[f"{river}_zscore"], window=90)
 
     feat_df = pd.DataFrame(features)
+
+    # ── Cross-river interactions ──────────────────────────────────────────
+    if "discharge_cfs_snake" in flow.columns and "discharge_cfs_columbia" in flow.columns:
+        snake_raw = flow["discharge_cfs_snake"].astype(float)
+        columbia_raw = flow["discharge_cfs_columbia"].astype(float)
+        ratio = snake_raw / columbia_raw.replace(0, np.nan)
+        feat_df["snake_columbia_ratio"] = _weekly_zscore(ratio)
+
+    zscore_cols = [c for c in feat_df.columns if c.endswith("_zscore") and not c.startswith("midc")]
+    if zscore_cols:
+        feat_df["min_zscore"] = feat_df[zscore_cols].min(axis=1)
+
+    deficit_cols = [c for c in feat_df.columns if c.endswith("_deficit")]
+    if deficit_cols:
+        feat_df["mean_deficit"] = feat_df[deficit_cols].mean(axis=1)
+
+    if zscore_cols:
+        feat_df["drought_breadth"] = (feat_df[zscore_cols] < -1).sum(axis=1) / len(zscore_cols)
+
+    # ── Non-linear threshold features ─────────────────────────────────────
+    if "snake_zscore" in feat_df.columns:
+        feat_df["snake_drought_flag"] = (feat_df["snake_zscore"] < -1).astype(float)
+
+    if "snake_deficit" in feat_df.columns:
+        feat_df["deficit_extreme"] = (feat_df["snake_deficit"] < -20).astype(float)
+
+    # ICE MID-C electricity features
+    if ice is not None and not ice.empty:
+        ice_feats = _build_ice_features(ice)
+        feat_df = feat_df.join(ice_feats, how="left")
 
     # Seasonal encoding (residual after z-scoring)
     week = feat_df.index.isocalendar().week.astype(int)
@@ -160,7 +241,11 @@ def load_dataset_split() -> tuple[Any, Any, Any, Any]:
     flow   = pd.read_csv(FLOW_FILE,   index_col=0, parse_dates=True)
     stocks = pd.read_csv(STOCKS_FILE, index_col=0, parse_dates=True)
 
-    X = build_features(flow, stocks)
+    ice = None
+    if USE_ICE_FEATURES and ICE_FILE.exists():
+        ice = pd.read_csv(ICE_FILE, index_col=0, parse_dates=True)
+
+    X = build_features(flow, stocks, ice=ice)
     y = build_target(stocks, forward_days=FORWARD_DAYS)
 
     # Align on common index, drop rows with any NaN in X or y

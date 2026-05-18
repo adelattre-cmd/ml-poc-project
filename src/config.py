@@ -59,9 +59,19 @@ MODELS = {
     "xgboost": {
         "name": "XGBoost",
         "description": (
-            "Gradient boosted trees. Best at capturing threshold effects "
-            "(e.g. flow drops below a critical level → sharp margin compression)."
+            "Gradient boosted trees with early stopping. Best at capturing "
+            "threshold effects (e.g. flow drops below a critical level → "
+            "sharp margin compression). Tuned via walk-forward CV."
         ),
         "path": MODELS_DIR / "xgboost.joblib",
+    },
+    "ensemble": {
+        "name": "Stacking Ensemble",
+        "description": (
+            "Ridge meta-learner stacking all base models. Uses walk-forward "
+            "out-of-fold predictions to learn optimal model weights, reducing "
+            "variance and improving signal consistency across market regimes."
+        ),
+        "path": MODELS_DIR / "ensemble.joblib",
     },
 }
