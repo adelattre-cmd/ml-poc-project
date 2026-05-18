@@ -4,6 +4,8 @@ Builds a supervised ML dataset from:
   - USGS daily streamflow (Columbia, Snake, Willamette, Deschutes rivers)
   - IDACORP (IDA) and XLU adjusted close prices
   - ICE MID-C electricity spot prices (optional — see USE_ICE_FEATURES)
+  - SNOTEL snowpack / SWE data (Idaho headwaters — leading indicator of flow)
+  - Henry Hub natural gas prices (replacement cost signal for IDACORP)
 
 Target:
   IDA excess return over XLU, forward FORWARD_DAYS trading days.
@@ -52,6 +54,8 @@ HYDRO_DIR    = DATA_DIR / "raw" / "hydro"
 FLOW_FILE    = HYDRO_DIR / "usgs_streamflow_daily.csv"
 STOCKS_FILE  = HYDRO_DIR / "stock_prices_daily.csv"
 ICE_FILE     = HYDRO_DIR / "ice_midc_daily.csv"
+SNOTEL_FILE  = HYDRO_DIR / "snotel_swe_daily.csv"
+GAS_FILE     = HYDRO_DIR / "henry_hub_gas_daily.csv"
 
 # ICE features are available but disabled by default: walk-forward CV showed
 # they degrade IC in 4/5 folds (signal is redundant with streamflow z-scores).
@@ -142,12 +146,43 @@ def _build_ice_features(ice: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(feats)
 
 
+# ── SNOTEL snowpack feature helpers ──────────────────────────────────────────
+
+def _build_snotel_features(snotel: pd.DataFrame) -> pd.DataFrame:
+    """Build snowpack features from SNOTEL SWE data."""
+    swe = snotel["swe_mean"].astype(float)
+    feats: dict[str, pd.Series] = {}
+
+    feats["swe_zscore"] = _weekly_zscore(swe)
+    feats["swe_pct"] = _weekly_percentile(swe)
+    feats["swe_trend"] = _rolling_trend(swe, window=30)
+    feats["swe_deficit"] = _cumulative_deficit(_weekly_zscore(swe), window=90)
+
+    return pd.DataFrame(feats)
+
+
+# ── Natural gas feature helpers ──────────────────────────────────────────────
+
+def _build_gas_features(gas: pd.DataFrame) -> pd.DataFrame:
+    """Build natural gas price features from Henry Hub data."""
+    price = gas["gas_price"].astype(float)
+    feats: dict[str, pd.Series] = {}
+
+    feats["gas_zscore"] = _weekly_zscore(price)
+    feats["gas_vol_30d"] = price.pct_change(fill_method=None).rolling(30, min_periods=15).std() * np.sqrt(252)
+    feats["gas_trend"] = _rolling_trend(price, window=30)
+
+    return pd.DataFrame(feats)
+
+
 # ── Main feature builder ───────────────────────────────────────────────────────
 
 def build_features(
     flow: pd.DataFrame,
     stocks: pd.DataFrame,
     ice: pd.DataFrame | None = None,
+    snotel: pd.DataFrame | None = None,
+    gas: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Assemble the full feature matrix aligned to trading days."""
     features = {}
@@ -199,6 +234,20 @@ def build_features(
     if ice is not None and not ice.empty:
         ice_feats = _build_ice_features(ice)
         feat_df = feat_df.join(ice_feats, how="left")
+
+    # SNOTEL snowpack features
+    if snotel is not None and not snotel.empty:
+        snotel_feats = _build_snotel_features(snotel)
+        feat_df = feat_df.join(snotel_feats, how="left")
+
+    # Natural gas features
+    if gas is not None and not gas.empty:
+        gas_feats = _build_gas_features(gas)
+        feat_df = feat_df.join(gas_feats, how="left")
+
+        # Interaction: low snowpack + high gas = margin squeeze for IDACORP
+        if snotel is not None and "swe_zscore" in feat_df.columns:
+            feat_df["swe_gas_interact"] = feat_df["swe_zscore"] * feat_df["gas_zscore"] * -1
 
     # Seasonal encoding (residual after z-scoring)
     week = feat_df.index.isocalendar().week.astype(int)
@@ -262,7 +311,15 @@ def load_dataset_split() -> tuple[Any, Any, Any, Any]:
     if USE_ICE_FEATURES and ICE_FILE.exists():
         ice = pd.read_csv(ICE_FILE, index_col=0, parse_dates=True)
 
-    X = build_features(flow, stocks, ice=ice)
+    snotel = None
+    if SNOTEL_FILE.exists():
+        snotel = pd.read_csv(SNOTEL_FILE, index_col=0, parse_dates=True)
+
+    gas = None
+    if GAS_FILE.exists():
+        gas = pd.read_csv(GAS_FILE, index_col=0, parse_dates=True)
+
+    X = build_features(flow, stocks, ice=ice, snotel=snotel, gas=gas)
     y = build_target(stocks, forward_days=FORWARD_DAYS)
 
     # Align on common index, drop rows with any NaN in X or y

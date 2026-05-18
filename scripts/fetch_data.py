@@ -158,29 +158,125 @@ def consolidate_ice_midc() -> pd.DataFrame:
     return result
 
 
+# ── SNOTEL stations (Snake River / central Idaho headwaters) ──────────────────
+SNOTEL_STATIONS = {
+    "bogus_basin":     "550:ID:SNTL",
+    "dollarhide":      "489:ID:SNTL",
+    "banner_summit":   "312:ID:SNTL",
+    "trinity_mtn":     "774:ID:SNTL",
+}
+
+
+def fetch_snotel_snowpack() -> pd.DataFrame:
+    """Download daily Snow Water Equivalent from SNOTEL stations in Idaho."""
+    print("  Fetching SNOTEL snowpack data...")
+    frames = []
+    for name, triplet in SNOTEL_STATIONS.items():
+        print(f"    Station: {name} ({triplet})...")
+        url = "https://wcc.sc.egov.usda.gov/awdbRestApi/services/v1/data"
+        params = {
+            "stationTriplets": triplet,
+            "elements": "WTEQ",
+            "beginDate": START_DATE,
+            "endDate": "2026-12-31",
+            "duration": "DAILY",
+        }
+        try:
+            resp = requests.get(url, params=params, timeout=60)
+            resp.raise_for_status()
+            data = resp.json()
+
+            if not data or not data[0].get("data"):
+                print(f"      WARNING: no data for {name}")
+                continue
+
+            values = data[0]["data"][0]["values"]
+            records = [
+                {"date": v["date"], f"swe_{name}": v["value"]}
+                for v in values
+                if v.get("value") is not None and v["value"] >= 0
+            ]
+            df = pd.DataFrame(records)
+            df["date"] = pd.to_datetime(df["date"])
+            df = df.set_index("date")
+            frames.append(df)
+        except Exception as e:
+            print(f"      ERROR: {e}")
+        time.sleep(0.5)
+
+    if not frames:
+        print("  WARNING: no SNOTEL data retrieved")
+        return pd.DataFrame()
+
+    result = pd.concat(frames, axis=1).sort_index()
+    swe_cols = [c for c in result.columns if c.startswith("swe_")]
+    result["swe_mean"] = result[swe_cols].mean(axis=1)
+    result = result.ffill(limit=3)
+    print(f"  SNOTEL: {result['swe_mean'].notna().sum()} days "
+          f"({result.index[0].date()} -> {result.index[-1].date()})")
+    return result
+
+
+def fetch_natural_gas() -> pd.DataFrame:
+    """Download Henry Hub natural gas futures prices via yfinance."""
+    print("  Fetching Henry Hub natural gas (NG=F)...")
+    data = yf.download("NG=F", start=START_DATE, auto_adjust=True, progress=False)
+    prices = data["Close"]
+    if isinstance(prices, pd.DataFrame):
+        prices = prices.iloc[:, 0]
+    prices = prices.dropna()
+    prices.name = "gas_price"
+    prices.index = pd.to_datetime(prices.index)
+    prices.index.name = "date"
+
+    # Reindex to daily and forward-fill (weekends/holidays)
+    full_idx = pd.date_range(prices.index.min(), prices.index.max(), freq="D")
+    result = prices.reindex(full_idx).ffill(limit=5)
+    result = result.to_frame()
+    result.index.name = "date"
+
+    print(f"  Gas: {result['gas_price'].notna().sum()} days "
+          f"({result.index[0].date()} -> {result.index[-1].date()})")
+    return result
+
+
 def main() -> None:
     print("=" * 60)
     print("Hydro-Alpha Data Fetch")
     print("=" * 60)
 
-    print("\n[1/3] USGS Streamflow")
+    print("\n[1/5] USGS Streamflow")
     flow = fetch_usgs_streamflow()
     flow_path = HYDRO_DIR / "usgs_streamflow_daily.csv"
     flow.to_csv(flow_path)
     print(f"  -> Saved to {flow_path.relative_to(PROJECT_ROOT)}")
 
-    print("\n[2/3] Stock Prices")
+    print("\n[2/5] Stock Prices")
     stocks = fetch_stock_prices()
     stocks_path = HYDRO_DIR / "stock_prices_daily.csv"
     stocks.to_csv(stocks_path)
     print(f"  -> Saved to {stocks_path.relative_to(PROJECT_ROOT)}")
 
-    print("\n[3/3] ICE Electricity (MID-C Hub)")
+    print("\n[3/5] ICE Electricity (MID-C Hub)")
     ice = consolidate_ice_midc()
     if not ice.empty:
         ice_path = HYDRO_DIR / "ice_midc_daily.csv"
         ice.to_csv(ice_path)
         print(f"  -> Saved to {ice_path.relative_to(PROJECT_ROOT)}")
+
+    print("\n[4/5] SNOTEL Snowpack (Idaho)")
+    snotel = fetch_snotel_snowpack()
+    if not snotel.empty:
+        snotel_path = HYDRO_DIR / "snotel_swe_daily.csv"
+        snotel.to_csv(snotel_path)
+        print(f"  -> Saved to {snotel_path.relative_to(PROJECT_ROOT)}")
+
+    print("\n[5/5] Henry Hub Natural Gas")
+    gas = fetch_natural_gas()
+    if not gas.empty:
+        gas_path = HYDRO_DIR / "henry_hub_gas_daily.csv"
+        gas.to_csv(gas_path)
+        print(f"  -> Saved to {gas_path.relative_to(PROJECT_ROOT)}")
 
     print("\nDone. All data saved to data/raw/hydro/")
 

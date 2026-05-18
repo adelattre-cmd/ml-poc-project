@@ -15,6 +15,8 @@ from data import (
     _rolling_trend,
     _cumulative_deficit,
     _build_ice_features,
+    _build_snotel_features,
+    _build_gas_features,
     RIVERS,
     TRAIN_END,
     TEST_START,
@@ -52,6 +54,25 @@ def sample_ice():
     return pd.DataFrame({
         "midc_price": np.abs(prices),
         "midc_volume": np.random.randint(1000, 100000, 1000),
+    }, index=dates)
+
+
+@pytest.fixture
+def sample_snotel():
+    dates = pd.date_range("2005-01-01", periods=1000, freq="D")
+    np.random.seed(42)
+    swe_base = 5 + 4 * np.sin(2 * np.pi * np.arange(1000) / 365)
+    return pd.DataFrame({
+        "swe_mean": np.abs(swe_base + np.random.normal(0, 1, 1000)),
+    }, index=dates)
+
+
+@pytest.fixture
+def sample_gas():
+    dates = pd.date_range("2005-01-01", periods=1000, freq="D")
+    np.random.seed(42)
+    return pd.DataFrame({
+        "gas_price": np.abs(3 + np.random.normal(0, 0.5, 1000)),
     }, index=dates)
 
 
@@ -121,12 +142,39 @@ class TestBuildIceFeatures:
         assert 0.02 < rate < 0.25
 
 
+# ── SNOTEL features tests ───────────────────────────────────────────────────
+
+class TestBuildSnotelFeatures:
+    def test_output_columns(self, sample_snotel):
+        feats = _build_snotel_features(sample_snotel)
+        expected = {"swe_zscore", "swe_pct", "swe_trend", "swe_deficit"}
+        assert set(feats.columns) == expected
+
+    def test_zscore_mean_near_zero(self, sample_snotel):
+        feats = _build_snotel_features(sample_snotel)
+        valid = feats["swe_zscore"].dropna()
+        assert abs(valid.mean()) < 0.5
+
+
+# ── Gas features tests ──────────────────────────────────────────────────────
+
+class TestBuildGasFeatures:
+    def test_output_columns(self, sample_gas):
+        feats = _build_gas_features(sample_gas)
+        expected = {"gas_zscore", "gas_vol_30d", "gas_trend"}
+        assert set(feats.columns) == expected
+
+    def test_zscore_mean_near_zero(self, sample_gas):
+        feats = _build_gas_features(sample_gas)
+        valid = feats["gas_zscore"].dropna()
+        assert abs(valid.mean()) < 0.5
+
+
 # ── Feature builder tests ─────────────────────────────────────────────────────
 
 class TestBuildFeatures:
-    def test_without_ice(self, sample_flow, sample_stocks):
+    def test_without_extras(self, sample_flow, sample_stocks):
         X = build_features(sample_flow, sample_stocks, ice=None)
-        # 4 rivers * (4 base + 2 lagged) + 6 interaction/threshold + 2 seasonal + 2 momentum = 34
         assert X.shape[1] == 34
 
     def test_with_ice(self, sample_flow, sample_stocks, sample_ice):
@@ -134,6 +182,18 @@ class TestBuildFeatures:
         assert X.shape[1] == 38  # 34 base + 4 ICE features
         ice_cols = [c for c in X.columns if "midc" in c]
         assert len(ice_cols) == 4
+
+    def test_with_snotel(self, sample_flow, sample_stocks, sample_snotel):
+        X = build_features(sample_flow, sample_stocks, snotel=sample_snotel)
+        assert X.shape[1] == 38  # 34 base + 4 SNOTEL features
+
+    def test_with_gas(self, sample_flow, sample_stocks, sample_gas):
+        X = build_features(sample_flow, sample_stocks, gas=sample_gas)
+        assert X.shape[1] == 37  # 34 base + 3 gas features
+
+    def test_with_snotel_and_gas(self, sample_flow, sample_stocks, sample_snotel, sample_gas):
+        X = build_features(sample_flow, sample_stocks, snotel=sample_snotel, gas=sample_gas)
+        assert X.shape[1] == 42  # 34 + 4 snotel + 3 gas + 1 interaction
 
     def test_lagged_features_present(self, sample_flow, sample_stocks):
         X = build_features(sample_flow, sample_stocks)
