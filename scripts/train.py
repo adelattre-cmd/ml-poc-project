@@ -411,6 +411,10 @@ def train() -> None:
     X_test = X_test[kept_features]
     X_all = X_all[kept_features]
 
+    features_path = RESULTS_DIR / "selected_features.json"
+    features_path.write_text(json.dumps(kept_features, indent=2))
+    print(f"  Selected features saved → {features_path.relative_to(PROJECT_ROOT)}")
+
     # ── Step 2: Hyperparameter tuning ─────────────────────────────────────
     best_params = tune_hyperparams(X_all, y_all)
 

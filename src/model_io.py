@@ -62,14 +62,14 @@ def load_model(model_path: Path) -> Any:
             ) from exc
 
         obj = joblib.load(model_path)
-        if isinstance(obj, dict) and "base_models" in obj and "meta_learner" in obj:
+        if isinstance(obj, dict) and "base_models" in obj and ("weights" in obj or "meta_learner" in obj):
             return EnsembleModel(obj)
         return obj
 
     if suffix in {".pkl", ".pickle"}:
         with model_path.open("rb") as file_handle:
             obj = pickle.load(file_handle)
-        if isinstance(obj, dict) and "base_models" in obj and "meta_learner" in obj:
+        if isinstance(obj, dict) and "base_models" in obj and ("weights" in obj or "meta_learner" in obj):
             return EnsembleModel(obj)
         return obj
 

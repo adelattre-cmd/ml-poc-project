@@ -40,6 +40,7 @@ Feature engineering:
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import numpy as np
@@ -48,7 +49,7 @@ from scipy import stats
 
 import os
 
-from config import DATA_DIR, FORWARD_DAYS, TARGET_TICKER, BENCH_TICKER
+from config import DATA_DIR, FORWARD_DAYS, TARGET_TICKER, BENCH_TICKER, RESULTS_DIR
 
 HYDRO_DIR    = DATA_DIR / "raw" / "hydro"
 FLOW_FILE    = HYDRO_DIR / "usgs_streamflow_daily.csv"
@@ -326,6 +327,14 @@ def load_dataset_split() -> tuple[Any, Any, Any, Any]:
     common = X.index.intersection(y.dropna().index)
     X = X.loc[common].dropna()
     y = y.loc[X.index]
+
+    # Apply feature pruning if a trained selection exists
+    selected_features_file = RESULTS_DIR / "selected_features.json"
+    if selected_features_file.exists():
+        selected = json.loads(selected_features_file.read_text())
+        available = [f for f in selected if f in X.columns]
+        if available:
+            X = X[available]
 
     train_mask = X.index <= TRAIN_END
     test_mask  = X.index >= TEST_START

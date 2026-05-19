@@ -1,0 +1,20 @@
+[
+  "sin_week",
+  "gas_zscore",
+  "cos_week",
+  "columbia_deficit",
+  "swe_gas_interact",
+  "deschutes_deficit",
+  "rel_mom_20d",
+  "mean_deficit",
+  "swe_deficit",
+  "snake_deficit",
+  "willamette_deficit",
+  "willamette_zscore_14d",
+  "gas_vol_30d",
+  "gas_trend",
+  "swe_pct",
+  "deschutes_zscore_7d",
+  "ida_mom_20d",
+  "swe_trend"
+]
