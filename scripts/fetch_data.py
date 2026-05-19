@@ -78,9 +78,9 @@ def fetch_usgs_streamflow() -> pd.DataFrame:
 
 
 def fetch_stock_prices() -> pd.DataFrame:
-    """Download adjusted close prices for IDA and XLU via yfinance."""
-    print("  Fetching stock prices: IDA, XLU...")
-    tickers = ["IDA", "XLU"]
+    """Download adjusted close prices for hydro utilities and XLU via yfinance."""
+    tickers = ["IDA", "XLU", "POR", "AVA"]
+    print(f"  Fetching stock prices: {', '.join(tickers)}...")
     data = yf.download(tickers, start=START_DATE, auto_adjust=True, progress=False)
     prices = data["Close"][tickers]
     prices.index = pd.to_datetime(prices.index)
