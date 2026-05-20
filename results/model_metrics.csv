@@ -1,6 +1,6 @@
 model_key,model_name,model_path,ic,hit_rate,sharpe,gated_sharpe,gated_hit,rmse,mae,r2
-pca_ridge,PCA + Ridge,/Users/alexandredelattre/ML_POC/ml-poc-project/models/pca_ridge.joblib,-0.004473,0.469539,-0.135712,0.108951,0.462834,0.037752,0.030087,-0.108646
-ridge,Ridge Regression,/Users/alexandredelattre/ML_POC/ml-poc-project/models/ridge.joblib,0.00589,0.501238,0.042869,-0.040362,0.471754,0.038754,0.030619,-0.168293
-random_forest,Random Forest,/Users/alexandredelattre/ML_POC/ml-poc-project/models/random_forest.joblib,0.211099,0.540862,0.362908,0.372903,0.553023,0.035697,0.027947,0.008738
-xgboost,XGBoost,/Users/alexandredelattre/ML_POC/ml-poc-project/models/xgboost.joblib,0.104141,0.508668,0.221525,0.151075,0.481665,0.037542,0.029724,-0.096369
-ensemble,Stacking Ensemble,/Users/alexandredelattre/ML_POC/ml-poc-project/models/ensemble.joblib,0.113686,0.510154,0.132337,0.210859,0.512389,0.036614,0.028781,-0.042845
+pca_ridge,PCA + Ridge,/Users/alexandredelattre/ML_POC/ml-poc-project/models/pca_ridge.joblib,0.008103,0.491332,-0.059521,0.125979,0.473736,0.038788,0.030579,-0.170376
+ridge,Ridge Regression,/Users/alexandredelattre/ML_POC/ml-poc-project/models/ridge.joblib,-0.004102,0.473006,-0.109154,0.125041,0.483647,0.04138,0.0328,-0.331996
+random_forest,Random Forest,/Users/alexandredelattre/ML_POC/ml-poc-project/models/random_forest.joblib,0.19219,0.532937,0.309972,0.378958,0.540139,0.036517,0.029013,-0.03735
+xgboost,XGBoost,/Users/alexandredelattre/ML_POC/ml-poc-project/models/xgboost.joblib,0.077222,0.460624,-0.003726,0.002438,0.450844,0.037344,0.029872,-0.084827
+ensemble,Stacking Ensemble,/Users/alexandredelattre/ML_POC/ml-poc-project/models/ensemble.joblib,0.093351,0.499752,-0.022425,0.22209,0.501487,0.037464,0.029554,-0.091847

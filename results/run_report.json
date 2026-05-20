@@ -1,5 +1,5 @@
 {
-  "generated_at_utc": "2026-05-19T13:10:26.338281+00:00",
+  "generated_at_utc": "2026-05-19T15:16:37.102708+00:00",
   "dataset_contract": "data.load_dataset_split() -> (X_train, X_test, y_train, y_test)",
   "metrics_contract": "metrics.compute_metrics(y_true, y_pred) -> dict[str, float]",
   "streamlit_entrypoint": "/Users/alexandredelattre/ML_POC/ml-poc-project/src/app.py",

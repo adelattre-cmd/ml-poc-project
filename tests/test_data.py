@@ -17,6 +17,7 @@ from data import (
     _build_ice_features,
     _build_snotel_features,
     _build_gas_features,
+    _build_weather_features,
     RIVERS,
     TRAIN_END,
     TEST_START,
@@ -73,6 +74,18 @@ def sample_gas():
     np.random.seed(42)
     return pd.DataFrame({
         "gas_price": np.abs(3 + np.random.normal(0, 0.5, 1000)),
+    }, index=dates)
+
+
+@pytest.fixture
+def sample_weather():
+    dates = pd.date_range("2005-01-01", periods=1000, freq="D")
+    np.random.seed(42)
+    temp_base = 10 + 15 * np.sin(2 * np.pi * np.arange(1000) / 365)
+    precip_base = 3 + 2 * np.sin(2 * np.pi * np.arange(1000) / 365 + np.pi)
+    return pd.DataFrame({
+        "temp_mean": temp_base + np.random.normal(0, 3, 1000),
+        "precip_mean": np.abs(precip_base + np.random.normal(0, 1, 1000)),
     }, index=dates)
 
 
@@ -170,6 +183,25 @@ class TestBuildGasFeatures:
         assert abs(valid.mean()) < 0.5
 
 
+# ── Weather features tests ─────────────────────────────────────────────────
+
+class TestBuildWeatherFeatures:
+    def test_output_columns(self, sample_weather):
+        feats = _build_weather_features(sample_weather)
+        expected = {"temp_anomaly", "temp_trend", "precip_anomaly", "precip_deficit", "warm_dry_interact"}
+        assert set(feats.columns) == expected
+
+    def test_temp_anomaly_mean_near_zero(self, sample_weather):
+        feats = _build_weather_features(sample_weather)
+        valid = feats["temp_anomaly"].dropna()
+        assert abs(valid.mean()) < 0.5
+
+    def test_precip_deficit_cumulative(self, sample_weather):
+        feats = _build_weather_features(sample_weather)
+        valid = feats["precip_deficit"].dropna()
+        assert len(valid) > 0
+
+
 # ── Feature builder tests ─────────────────────────────────────────────────────
 
 class TestBuildFeatures:
@@ -194,6 +226,14 @@ class TestBuildFeatures:
     def test_with_snotel_and_gas(self, sample_flow, sample_stocks, sample_snotel, sample_gas):
         X = build_features(sample_flow, sample_stocks, snotel=sample_snotel, gas=sample_gas)
         assert X.shape[1] == 42  # 34 + 4 snotel + 3 gas + 1 interaction
+
+    def test_with_weather(self, sample_flow, sample_stocks, sample_weather):
+        X = build_features(sample_flow, sample_stocks, weather=sample_weather)
+        assert X.shape[1] == 39  # 34 base + 5 weather features
+
+    def test_with_all(self, sample_flow, sample_stocks, sample_snotel, sample_gas, sample_weather):
+        X = build_features(sample_flow, sample_stocks, snotel=sample_snotel, gas=sample_gas, weather=sample_weather)
+        assert X.shape[1] == 47  # 34 + 4 snotel + 3 gas + 1 interaction + 5 weather
 
     def test_lagged_features_present(self, sample_flow, sample_stocks):
         X = build_features(sample_flow, sample_stocks)

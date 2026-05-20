@@ -57,6 +57,7 @@ STOCKS_FILE  = HYDRO_DIR / "stock_prices_daily.csv"
 ICE_FILE     = HYDRO_DIR / "ice_midc_daily.csv"
 SNOTEL_FILE  = HYDRO_DIR / "snotel_swe_daily.csv"
 GAS_FILE     = HYDRO_DIR / "henry_hub_gas_daily.csv"
+WEATHER_FILE = HYDRO_DIR / "weather_daily.csv"
 
 # ICE features are available but disabled by default: walk-forward CV showed
 # they degrade IC in 4/5 folds (signal is redundant with streamflow z-scores).
@@ -162,6 +163,30 @@ def _build_snotel_features(snotel: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(feats)
 
 
+# ── Weather feature helpers ─────────────────────────────────────────────────
+
+def _build_weather_features(weather: pd.DataFrame) -> pd.DataFrame:
+    """Build weather features from Open-Meteo temperature and precipitation."""
+    feats: dict[str, pd.Series] = {}
+
+    if "temp_mean" in weather.columns:
+        temp = weather["temp_mean"].astype(float)
+        feats["temp_anomaly"] = _weekly_zscore(temp)
+        feats["temp_trend"] = _rolling_trend(temp, window=30)
+
+    if "precip_mean" in weather.columns:
+        precip = weather["precip_mean"].astype(float)
+        precip_z = _weekly_zscore(precip)
+        feats["precip_anomaly"] = precip_z
+        feats["precip_deficit"] = _cumulative_deficit(precip_z, window=90)
+
+    # Warm + dry = snowmelt exhaustion + low future runoff
+    if "temp_anomaly" in feats and "precip_anomaly" in feats:
+        feats["warm_dry_interact"] = feats["temp_anomaly"] * feats["precip_anomaly"] * -1
+
+    return pd.DataFrame(feats)
+
+
 # ── Natural gas feature helpers ──────────────────────────────────────────────
 
 def _build_gas_features(gas: pd.DataFrame) -> pd.DataFrame:
@@ -184,6 +209,7 @@ def build_features(
     ice: pd.DataFrame | None = None,
     snotel: pd.DataFrame | None = None,
     gas: pd.DataFrame | None = None,
+    weather: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Assemble the full feature matrix aligned to trading days."""
     features = {}
@@ -249,6 +275,11 @@ def build_features(
         # Interaction: low snowpack + high gas = margin squeeze for IDACORP
         if snotel is not None and "swe_zscore" in feat_df.columns:
             feat_df["swe_gas_interact"] = feat_df["swe_zscore"] * feat_df["gas_zscore"] * -1
+
+    # Weather features (temperature + precipitation)
+    if weather is not None and not weather.empty:
+        weather_feats = _build_weather_features(weather)
+        feat_df = feat_df.join(weather_feats, how="left")
 
     # Seasonal encoding (residual after z-scoring)
     week = feat_df.index.isocalendar().week.astype(int)

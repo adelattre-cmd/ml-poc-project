@@ -161,7 +161,7 @@ def section_data(flow, stocks):
     - **USGS** : debit journalier de 4 rivieres du Pacific Northwest
     - **SNOTEL** : manteau neigeux (SWE) dans les montagnes de l'Idaho
     - **Henry Hub** : prix du gaz naturel (cout de remplacement)
-    - **Yahoo Finance** : prix IDA et XLU
+    - **Yahoo Finance** : prix IDA, AVA, POR et XLU
     - **ICE** : prix spot electricite MID-C (optionnel)
     """)
 

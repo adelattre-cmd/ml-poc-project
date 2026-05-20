@@ -240,6 +240,69 @@ def fetch_natural_gas() -> pd.DataFrame:
     return result
 
 
+# ── Weather data (Open-Meteo) ────────────────────────────────────────────────
+WEATHER_STATIONS = {
+    "mccall_id":     (44.73, -116.10),   # Snake River headwaters
+    "govt_camp_or":  (45.30, -121.75),   # Cascade Range (Columbia/Willamette)
+    "boise_id":      (43.62, -116.21),   # Snake River basin
+}
+
+
+def fetch_weather() -> pd.DataFrame:
+    """Download daily temp and precipitation from Open-Meteo archive API."""
+    from datetime import date as _date
+
+    print("  Fetching weather data (Open-Meteo)...")
+    end_date = (_date.today().replace(day=1) - pd.Timedelta(days=1)).isoformat()
+    frames = []
+    for name, (lat, lon) in WEATHER_STATIONS.items():
+        print(f"    Station: {name} ({lat}, {lon})...")
+        url = "https://archive-api.open-meteo.com/v1/archive"
+        params = {
+            "latitude": lat,
+            "longitude": lon,
+            "start_date": START_DATE,
+            "end_date": end_date,
+            "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum",
+            "timezone": "America/Boise",
+        }
+        try:
+            resp = requests.get(url, params=params, timeout=120)
+            resp.raise_for_status()
+            data = resp.json()
+
+            daily = data["daily"]
+            df = pd.DataFrame({
+                "date": pd.to_datetime(daily["time"]),
+                f"tmax_{name}": daily["temperature_2m_max"],
+                f"tmin_{name}": daily["temperature_2m_min"],
+                f"precip_{name}": daily["precipitation_sum"],
+            })
+            df = df.set_index("date")
+            frames.append(df)
+        except Exception as e:
+            print(f"      ERROR: {e}")
+        time.sleep(0.5)
+
+    if not frames:
+        print("  WARNING: no weather data retrieved")
+        return pd.DataFrame()
+
+    result = pd.concat(frames, axis=1).sort_index()
+
+    tmax_cols = [c for c in result.columns if c.startswith("tmax_")]
+    tmin_cols = [c for c in result.columns if c.startswith("tmin_")]
+    precip_cols = [c for c in result.columns if c.startswith("precip_")]
+
+    result["temp_mean"] = (result[tmax_cols].mean(axis=1) + result[tmin_cols].mean(axis=1)) / 2
+    result["precip_mean"] = result[precip_cols].mean(axis=1)
+
+    result = result.ffill(limit=3)
+    print(f"  Weather: {result['temp_mean'].notna().sum()} days "
+          f"({result.index[0].date()} -> {result.index[-1].date()})")
+    return result
+
+
 def main() -> None:
     print("=" * 60)
     print("Hydro-Alpha Data Fetch")
