@@ -303,43 +303,85 @@ def fetch_weather() -> pd.DataFrame:
     return result
 
 
+# ── ENSO (Oceanic Niño Index) ────────────────────────────────────────────────
+
+def fetch_enso_oni() -> pd.DataFrame:
+    """Download monthly ONI (Oceanic Niño Index) from NOAA CPC."""
+    print("  Fetching ENSO ONI data from NOAA...")
+    url = "https://www.cpc.ncep.noaa.gov/data/indices/oni.ascii.txt"
+    resp = requests.get(url, timeout=30)
+    resp.raise_for_status()
+
+    month_map = {
+        "DJF": 1, "JFM": 2, "FMA": 3, "MAM": 4, "AMJ": 5, "MJJ": 6,
+        "JJA": 7, "JAS": 8, "ASO": 9, "SON": 10, "OND": 11, "NDJ": 12,
+    }
+
+    records = []
+    for line in resp.text.strip().split("\n")[1:]:
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        seas, yr, _, anom = parts[0], int(parts[1]), parts[2], float(parts[3])
+        month = month_map.get(seas)
+        if month is None:
+            continue
+        records.append({"date": pd.Timestamp(yr, month, 15), "oni": anom})
+
+    df = pd.DataFrame(records).set_index("date").sort_index()
+    full_idx = pd.date_range(df.index.min(), df.index.max(), freq="D")
+    df = df.reindex(full_idx).ffill()
+    df.index.name = "date"
+
+    print(f"  ENSO ONI: {df['oni'].notna().sum()} days "
+          f"({df.index[0].date()} -> {df.index[-1].date()})")
+    return df
+
+
 def main() -> None:
     print("=" * 60)
     print("Hydro-Alpha Data Fetch")
     print("=" * 60)
 
-    print("\n[1/5] USGS Streamflow")
+    print("\n[1/6] USGS Streamflow")
     flow = fetch_usgs_streamflow()
     flow_path = HYDRO_DIR / "usgs_streamflow_daily.csv"
     flow.to_csv(flow_path)
     print(f"  -> Saved to {flow_path.relative_to(PROJECT_ROOT)}")
 
-    print("\n[2/5] Stock Prices")
+    print("\n[2/6] Stock Prices")
     stocks = fetch_stock_prices()
     stocks_path = HYDRO_DIR / "stock_prices_daily.csv"
     stocks.to_csv(stocks_path)
     print(f"  -> Saved to {stocks_path.relative_to(PROJECT_ROOT)}")
 
-    print("\n[3/5] ICE Electricity (MID-C Hub)")
+    print("\n[3/6] ICE Electricity (MID-C Hub)")
     ice = consolidate_ice_midc()
     if not ice.empty:
         ice_path = HYDRO_DIR / "ice_midc_daily.csv"
         ice.to_csv(ice_path)
         print(f"  -> Saved to {ice_path.relative_to(PROJECT_ROOT)}")
 
-    print("\n[4/5] SNOTEL Snowpack (Idaho)")
+    print("\n[4/6] SNOTEL Snowpack (Idaho)")
     snotel = fetch_snotel_snowpack()
     if not snotel.empty:
         snotel_path = HYDRO_DIR / "snotel_swe_daily.csv"
         snotel.to_csv(snotel_path)
         print(f"  -> Saved to {snotel_path.relative_to(PROJECT_ROOT)}")
 
-    print("\n[5/5] Henry Hub Natural Gas")
+    print("\n[5/6] Henry Hub Natural Gas")
     gas = fetch_natural_gas()
     if not gas.empty:
         gas_path = HYDRO_DIR / "henry_hub_gas_daily.csv"
         gas.to_csv(gas_path)
         print(f"  -> Saved to {gas_path.relative_to(PROJECT_ROOT)}")
+
+    print("\n[6/6] ENSO (ONI)")
+    oni = fetch_enso_oni()
+    if not oni.empty:
+        oni_path = HYDRO_DIR / "enso_oni_daily.csv"
+        oni.to_csv(oni_path)
+        print(f"  -> Saved to {oni_path.relative_to(PROJECT_ROOT)}")
 
     print("\nDone. All data saved to data/raw/hydro/")
 

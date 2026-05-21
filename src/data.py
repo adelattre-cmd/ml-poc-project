@@ -58,6 +58,7 @@ ICE_FILE     = HYDRO_DIR / "ice_midc_daily.csv"
 SNOTEL_FILE  = HYDRO_DIR / "snotel_swe_daily.csv"
 GAS_FILE     = HYDRO_DIR / "henry_hub_gas_daily.csv"
 WEATHER_FILE = HYDRO_DIR / "weather_daily.csv"
+ENSO_FILE    = HYDRO_DIR / "enso_oni_daily.csv"
 
 # ICE features are available but disabled by default: walk-forward CV showed
 # they degrade IC in 4/5 folds (signal is redundant with streamflow z-scores).
@@ -187,6 +188,22 @@ def _build_weather_features(weather: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(feats)
 
 
+# ── ENSO feature helpers ───────────────────────────────────────────────────
+
+def _build_enso_features(enso: pd.DataFrame) -> pd.DataFrame:
+    """Build ENSO features from ONI index."""
+    oni = enso["oni"].astype(float)
+    feats: dict[str, pd.Series] = {}
+
+    feats["oni"] = oni
+    feats["oni_abs"] = oni.abs()
+    feats["oni_3m_trend"] = oni.diff(90)
+    feats["la_nina"] = (oni < -0.5).astype(float)
+    feats["el_nino"] = (oni > 0.5).astype(float)
+
+    return pd.DataFrame(feats)
+
+
 # ── Natural gas feature helpers ──────────────────────────────────────────────
 
 def _build_gas_features(gas: pd.DataFrame) -> pd.DataFrame:
@@ -210,6 +227,7 @@ def build_features(
     snotel: pd.DataFrame | None = None,
     gas: pd.DataFrame | None = None,
     weather: pd.DataFrame | None = None,
+    enso: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Assemble the full feature matrix aligned to trading days."""
     features = {}
@@ -281,6 +299,15 @@ def build_features(
         weather_feats = _build_weather_features(weather)
         feat_df = feat_df.join(weather_feats, how="left")
 
+    # ENSO features
+    if enso is not None and not enso.empty:
+        enso_feats = _build_enso_features(enso)
+        feat_df = feat_df.join(enso_feats, how="left")
+
+        # Interaction: La Niña + low snowpack = early warning of drought
+        if "swe_zscore" in feat_df.columns:
+            feat_df["oni_swe_interact"] = feat_df["oni"] * feat_df["swe_zscore"]
+
     # Seasonal encoding (residual after z-scoring)
     week = feat_df.index.isocalendar().week.astype(int)
     feat_df["sin_week"] = np.sin(2 * np.pi * week / 52)
@@ -351,7 +378,11 @@ def load_dataset_split() -> tuple[Any, Any, Any, Any]:
     if GAS_FILE.exists():
         gas = pd.read_csv(GAS_FILE, index_col=0, parse_dates=True)
 
-    X = build_features(flow, stocks, ice=ice, snotel=snotel, gas=gas)
+    enso = None
+    if ENSO_FILE.exists():
+        enso = pd.read_csv(ENSO_FILE, index_col=0, parse_dates=True)
+
+    X = build_features(flow, stocks, ice=ice, snotel=snotel, gas=gas, enso=enso)
     y = build_target(stocks, forward_days=FORWARD_DAYS)
 
     # Align on common index, drop rows with any NaN in X or y

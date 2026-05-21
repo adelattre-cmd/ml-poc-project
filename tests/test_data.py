@@ -18,6 +18,7 @@ from data import (
     _build_snotel_features,
     _build_gas_features,
     _build_weather_features,
+    _build_enso_features,
     RIVERS,
     TRAIN_END,
     TEST_START,
@@ -87,6 +88,15 @@ def sample_weather():
         "temp_mean": temp_base + np.random.normal(0, 3, 1000),
         "precip_mean": np.abs(precip_base + np.random.normal(0, 1, 1000)),
     }, index=dates)
+
+
+@pytest.fixture
+def sample_enso():
+    dates = pd.date_range("2005-01-01", periods=1000, freq="D")
+    np.random.seed(42)
+    oni = np.cumsum(np.random.normal(0, 0.02, 1000))
+    oni = np.clip(oni, -2.5, 2.5)
+    return pd.DataFrame({"oni": oni}, index=dates)
 
 
 # ── Helper function tests ─────────────────────────────────────────────────────
@@ -202,6 +212,23 @@ class TestBuildWeatherFeatures:
         assert len(valid) > 0
 
 
+# ── ENSO features tests ───────────────────────────────────────────────────
+
+class TestBuildEnsoFeatures:
+    def test_output_columns(self, sample_enso):
+        feats = _build_enso_features(sample_enso)
+        expected = {"oni", "oni_abs", "oni_3m_trend", "la_nina", "el_nino"}
+        assert set(feats.columns) == expected
+
+    def test_la_nina_binary(self, sample_enso):
+        feats = _build_enso_features(sample_enso)
+        assert set(feats["la_nina"].dropna().unique()).issubset({0.0, 1.0})
+
+    def test_el_nino_binary(self, sample_enso):
+        feats = _build_enso_features(sample_enso)
+        assert set(feats["el_nino"].dropna().unique()).issubset({0.0, 1.0})
+
+
 # ── Feature builder tests ─────────────────────────────────────────────────────
 
 class TestBuildFeatures:
@@ -231,9 +258,15 @@ class TestBuildFeatures:
         X = build_features(sample_flow, sample_stocks, weather=sample_weather)
         assert X.shape[1] == 39  # 34 base + 5 weather features
 
-    def test_with_all(self, sample_flow, sample_stocks, sample_snotel, sample_gas, sample_weather):
-        X = build_features(sample_flow, sample_stocks, snotel=sample_snotel, gas=sample_gas, weather=sample_weather)
-        assert X.shape[1] == 47  # 34 + 4 snotel + 3 gas + 1 interaction + 5 weather
+    def test_with_enso(self, sample_flow, sample_stocks, sample_snotel, sample_enso):
+        X = build_features(sample_flow, sample_stocks, snotel=sample_snotel, enso=sample_enso)
+        # 34 base + 4 snotel + 5 enso + 1 oni_swe_interact = 44
+        assert X.shape[1] == 44
+
+    def test_with_all(self, sample_flow, sample_stocks, sample_snotel, sample_gas, sample_weather, sample_enso):
+        X = build_features(sample_flow, sample_stocks, snotel=sample_snotel, gas=sample_gas, weather=sample_weather, enso=sample_enso)
+        # 34 + 4 snotel + 3 gas + 1 swe_gas + 5 weather + 5 enso + 1 oni_swe = 53
+        assert X.shape[1] == 53
 
     def test_lagged_features_present(self, sample_flow, sample_stocks):
         X = build_features(sample_flow, sample_stocks)
